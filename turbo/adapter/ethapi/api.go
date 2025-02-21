@@ -369,8 +369,8 @@ func RPCMarshalBlockExDeprecated(block *types.Block, inclTx bool, fullTx bool, b
 
 // RPCTransaction represents a transaction that will serialize to the RPC representation of a transaction
 type RPCTransaction struct {
-	BlockHash           *libcommon.Hash                `json:"-"`
-	BlockNumber         *hexutil.Big                   `json:"-"`
+	BlockHash           *libcommon.Hash                `json:"blockHash"`
+	BlockNumber         *hexutil.Big                   `json:"blockNumber"`
 	PubKey              libcommon.PubKeyCompressedType `json:"public_key"`
 	From                libcommon.Address              `json:"from"`
 	Gas                 hexutil.Uint64                 `json:"gas"`

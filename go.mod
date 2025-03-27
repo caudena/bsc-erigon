@@ -8,7 +8,7 @@ replace (
 	github.com/anacrolix/torrent => github.com/erigontech/torrent v1.54.3-alpha-1
 	github.com/cometbft/cometbft => github.com/bnb-chain/greenfield-cometbft v1.3.1
 	github.com/crate-crypto/go-kzg-4844 => github.com/erigontech/go-kzg-4844 v0.0.0-20250130131058-ce13be60bc86
-	github.com/erigontech/erigon-snapshot => github.com/node-real/bsc-erigon-snapshot v1.0.1-0.20241224070108-6fa500c226f9
+	github.com/erigontech/erigon-snapshot => github.com/node-real/bsc-erigon-snapshot v1.0.1-0.20250305092028-07418ecfda1f
 	github.com/holiman/bloomfilter/v2 => github.com/AskAlexSharov/bloomfilter/v2 v2.0.9
 	github.com/tendermint/tendermint => github.com/bnb-chain/tendermint v0.31.16
 )
@@ -23,7 +23,7 @@ require (
 require (
 	gfx.cafe/util/go/generic v0.0.0-20230721185457-c559e86c829c
 	github.com/99designs/gqlgen v0.17.63
-	github.com/Giulio2002/bls v0.0.0-20241116091023-2ddcc8954ec0
+	github.com/Giulio2002/bls v0.0.0-20250218151206-daa74641714d
 	github.com/Masterminds/sprig/v3 v3.2.3
 	github.com/RoaringBitmap/roaring/v2 v2.4.3
 	github.com/alecthomas/kong v0.8.1

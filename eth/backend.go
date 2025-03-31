@@ -340,11 +340,6 @@ func New(ctx context.Context, stack *node.Node, config *ethconfig.Config, logger
 		os.Exit(1)
 	}
 
-	// Apply special hacks for BSC params
-	if chainConfig.Parlia != nil {
-		params.ApplyBinanceSmartChainParams()
-	}
-
 	segmentsBuildLimiter := semaphore.NewWeighted(int64(dbg.BuildSnapshotAllowance))
 
 	// Check if we have an already initialized chain and fall back to
@@ -482,7 +477,7 @@ func New(ctx context.Context, stack *node.Node, config *ethconfig.Config, logger
 		}
 
 		go func() {
-			logEvery := time.NewTicker(180 * time.Second)
+			logEvery := time.NewTicker(90 * time.Second)
 			defer logEvery.Stop()
 
 			var logItems []interface{}

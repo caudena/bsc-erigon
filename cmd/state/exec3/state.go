@@ -19,8 +19,9 @@ package exec3
 import (
 	"context"
 	"fmt"
-	"github.com/erigontech/erigon/consensus/misc"
 	"sync"
+
+	"github.com/erigontech/erigon/consensus/misc"
 
 	"github.com/erigontech/erigon/core/systemcontracts"
 
@@ -123,6 +124,10 @@ func (rw *Worker) ResetState(rs *state.StateV3, accumulator *shards.Accumulator)
 		rw.SetReader(state.NewReaderV3(rs.Domains()))
 	}
 	rw.stateWriter = state.NewStateWriterV3(rs, accumulator)
+}
+
+func (rw *Worker) SetGaspool(gp *core.GasPool) {
+	rw.taskGasPool = gp
 }
 
 func (rw *Worker) Tx() kv.TemporalTx { return rw.chainTx }
@@ -331,6 +336,8 @@ func (rw *Worker) RunTxTaskNoLock(txTask *state.TxTask, isMining, skipPostEvalua
 				txTask.Logs = ibs.GetLogs(txTask.TxIndex, txTask.Tx.Hash(), txTask.BlockNum, txTask.BlockHash)
 				txTask.TraceFroms = rw.callTracer.Froms()
 				txTask.TraceTos = rw.callTracer.Tos()
+
+				txTask.CreateReceipt(rw.Tx())
 			}
 			return ret, true, nil
 		}
@@ -340,7 +347,8 @@ func (rw *Worker) RunTxTaskNoLock(txTask *state.TxTask, isMining, skipPostEvalua
 			txTask.Error = err
 		}
 	default:
-		rw.taskGasPool.Reset(txTask.Tx.GetGas(), rw.chainConfig.GetMaxBlobGasPerBlock(header.Time))
+		// This doesn't make sense, but I am not sure if this wrong behaviour is needed somewhere else:
+		// rw.taskGasPool.Reset(txTask.Tx.GetGasLimit(), rw.chainConfig.GetMaxBlobGasPerBlock(header.Time))
 		rw.callTracer.Reset()
 		rw.vmCfg.SkipAnalysis = txTask.SkipAnalysis
 		ibs.SetTxContext(txTask.TxIndex, txTask.BlockNum)
@@ -368,6 +376,8 @@ func (rw *Worker) RunTxTaskNoLock(txTask *state.TxTask, isMining, skipPostEvalua
 			txTask.Logs = ibs.GetLogs(txTask.TxIndex, txTask.Tx.Hash(), txTask.BlockNum, txTask.BlockHash)
 			txTask.TraceFroms = rw.callTracer.Froms()
 			txTask.TraceTos = rw.callTracer.Tos()
+
+			txTask.CreateReceipt(rw.Tx())
 		}
 
 	}

@@ -968,18 +968,18 @@ func (p *Parlia) finalize(header *types.Header, ibs *state.IntraBlockState, txs 
 	if err != nil {
 		return nil, nil, nil, err
 	}
+
 	curIndex := userTxs.Len()
-	// warn if not in majority fork
+
 	number := header.Number.Uint64()
 	snap, err := p.snapshot(chain, number-1, header.ParentHash, nil, false /* verify */)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	// If the block is an epoch end block, verify the validator list
-	// The verification can only be done when the state is ready, it can't be done in VerifyHeader.
-	parentHeader := chain.GetHeader(header.ParentHash, number-1)
 
+	parentHeader := chain.GetHeader(header.ParentHash, number-1)
 	var finish bool
+
 	defer func() {
 		if txIndex == len(txs)-1 && finish {
 			if fs := finality.GetFinalizationService(); fs != nil {
@@ -1020,9 +1020,7 @@ func (p *Parlia) finalize(header *types.Header, ibs *state.IntraBlockState, txs 
 		spoiledVal := snap.inturnValidator()
 		signedRecently := false
 		if p.chainConfig.IsPlato(header.Number.Uint64()) {
-			if snap.SignRecently(spoiledVal) {
-				signedRecently = true
-			}
+			signedRecently = snap.SignRecently(spoiledVal)
 		} else {
 			for _, recent := range snap.Recents {
 				if recent == spoiledVal {
@@ -1057,10 +1055,12 @@ func (p *Parlia) finalize(header *types.Header, ibs *state.IntraBlockState, txs 
 		}
 	}
 
-	finish, err = p.distributeToValidator(header.Coinbase, ibs, header, &txs, &receipts, &systemTxs, &header.GasUsed, mining, systemTxCall, &curIndex, &txIndex)
-	if err != nil || finish {
-		//log.Error("distributeIncoming", "block hash", header.Hash(), "error", err, "systemTxs", len(systemTxs))
-		return nil, nil, nil, err
+	if userTxs.Len() != 0 {
+		finish, err = p.distributeToValidator(header.Coinbase, ibs, header, &txs, &receipts, &systemTxs, &header.GasUsed, mining, systemTxCall, &curIndex, &txIndex)
+		if err != nil || finish {
+			//log.Error("distributeIncoming", "block hash", header.Hash(), "error", err, "systemTxs", len(systemTxs))
+			return nil, nil, nil, err
+		}
 	}
 
 	if p.chainConfig.IsPlato(header.Number.Uint64()) {
@@ -1632,7 +1632,7 @@ func (c *Parlia) GetPostApplyMessageFunc() evmtypes.PostApplyMessageFunc {
 func (p *Parlia) blockTimeVerifyForRamanujanFork(snap *Snapshot, header, parent *types.Header) error {
 	if p.chainConfig.IsRamanujan(header.Number.Uint64()) {
 		if header.MilliTimestamp() < parent.MilliTimestamp()+snap.BlockInterval+backOffTime(snap, parent, header, header.Coinbase, p.chainConfig) {
-			return fmt.Errorf("header %d, time %d, now %d, period: %d, backof: %d, %w", header.Number.Uint64(), header.Time, time.Now().Unix(), snap.BlockInterval, backOffTime(snap, parent, header, header.Coinbase, p.chainConfig), consensus.ErrFutureBlock)
+			return fmt.Errorf("header %d, time %d, parentTime %d, BlockInterval: %d, backOffTime: %d, %w", header.Number.Uint64(), header.MilliTimestamp(), parent.MilliTimestamp(), snap.BlockInterval, backOffTime(snap, parent, header, header.Coinbase, p.chainConfig), consensus.ErrFutureBlock)
 		}
 	}
 	return nil

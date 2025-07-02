@@ -19,9 +19,10 @@ package stagedsync
 import (
 	"context"
 	"fmt"
-	"github.com/erigontech/erigon/core"
 	"runtime"
 	"time"
+
+	"github.com/erigontech/erigon/core"
 
 	"github.com/erigontech/erigon-lib/log/v3"
 
@@ -105,13 +106,6 @@ func BodiesForward(s *StageState, u Unwinder, ctx context.Context, tx kv.RwTx, c
 	}
 	defer cfg.bd.ClearBodyCache()
 	var headerProgress, bodyProgress uint64
-
-	if cfg.chanConfig.Bor != nil {
-		headerProgress, err = stages.GetStageProgress(tx, stages.BorHeimdall)
-		if err != nil {
-			return err
-		}
-	}
 
 	if headerProgress == 0 {
 		headerProgress, err = stages.GetStageProgress(tx, stages.Headers)
@@ -246,10 +240,10 @@ func BodiesForward(s *StageState, u Unwinder, ctx context.Context, tx kv.RwTx, c
 					return true, nil
 				}
 
-				metrics.UpdateBlockConsumerBodyDownloadDelay(header.Time, header.Number.Uint64(), logger)
+				metrics.UpdateBlockConsumerBodyDownloadDelay(header.MilliTimestamp(), header.Number.Uint64(), logger)
 
 				if cfg.chanConfig.Parlia != nil && cfg.chanConfig.IsCancun(headerNumber, header.Time) {
-					if err = core.IsDataAvailable(cr, header, rawBody, cfg.bd.LatestBlock); err != nil {
+					if err = core.IsDataAvailable(cr, header, rawBody, cfg.bd.LatestBlockTime); err != nil {
 						return false, err
 					}
 				}

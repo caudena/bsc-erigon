@@ -27,7 +27,7 @@ import (
 
 	"github.com/erigontech/erigon-lib/common/hexutil"
 	"github.com/erigontech/erigon-lib/common/hexutility"
-
+	"github.com/erigontech/erigon-lib/gointerfaces/typesproto"
 	"github.com/erigontech/erigon-lib/log/v3"
 
 	libcommon "github.com/erigontech/erigon-lib/common"
@@ -154,10 +154,10 @@ func (cc *ExecutionClientRpc) NewPayload(
 	return newPayloadStatusByEngineStatus(payloadStatus.Status), checkPayloadStatus(payloadStatus)
 }
 
-func (cc *ExecutionClientRpc) ForkChoiceUpdate(ctx context.Context, finalized libcommon.Hash, head libcommon.Hash, attributes *engine_types.PayloadAttributes) ([]byte, error) {
+func (cc *ExecutionClientRpc) ForkChoiceUpdate(ctx context.Context, finalized, safe, head libcommon.Hash, attributes *engine_types.PayloadAttributes) ([]byte, error) {
 	forkChoiceRequest := engine_types.ForkChoiceState{
 		HeadHash:           head,
-		SafeBlockHash:      head,
+		SafeBlockHash:      safe,
 		FinalizedBlockHash: finalized,
 	}
 	forkChoiceResp := &engine_types.ForkChoiceUpdatedResponse{}
@@ -274,7 +274,7 @@ func (cc *ExecutionClientRpc) HasBlock(ctx context.Context, hash libcommon.Hash)
 
 // Block production
 
-func (cc *ExecutionClientRpc) GetAssembledBlock(ctx context.Context, id []byte) (*cltypes.Eth1Block, *engine_types.BlobsBundleV1, *big.Int, error) {
+func (cc *ExecutionClientRpc) GetAssembledBlock(ctx context.Context, id []byte) (*cltypes.Eth1Block, *engine_types.BlobsBundleV1, *typesproto.RequestsBundle, *big.Int, error) {
 	panic("unimplemented")
 }
 

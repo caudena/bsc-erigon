@@ -43,7 +43,6 @@ import (
 	"github.com/erigontech/erigon/core"
 	"github.com/erigontech/erigon/core/rawdb"
 	"github.com/erigontech/erigon/core/rawdb/rawdbhelpers"
-	"github.com/erigontech/erigon/core/rawdb/rawtemporaldb"
 	"github.com/erigontech/erigon/core/state"
 	"github.com/erigontech/erigon/core/types"
 	"github.com/erigontech/erigon/eth/ethconfig/estimate"
@@ -86,7 +85,7 @@ type Progress struct {
 	logger       log.Logger
 }
 
-func (p *Progress) Log(suffix string, rs *state.StateV3, in *state.QueueWithRetry, rws *state.ResultsQueue, txCount uint64, gas uint64, inputBlockNum uint64, outputBlockNum uint64, outTxNum uint64, repeatCount uint64, idxStepsAmountInDB float64, shouldGenerateChangesets bool, inMemExec bool) {
+func (p *Progress) Log(suffix string, rs *state.StateV3, in *state.QueueWithRetry, rws *state.ResultsQueue, txCount uint64, gas uint64, inputBlockNum uint64, outputBlockNum uint64, outTxNum uint64, repeatCount uint64, idxStepsAmountInDB float64, commitEveryBlock bool, inMemExec bool) {
 	mxExecStepsInDB.Set(idxStepsAmountInDB * 100)
 	var m runtime.MemStats
 	dbg.ReadMemStats(&m)
@@ -102,13 +101,13 @@ func (p *Progress) Log(suffix string, rs *state.StateV3, in *state.QueueWithRetr
 		suffix = " " + suffix
 	}
 
-	if shouldGenerateChangesets {
+	if commitEveryBlock {
 		suffix += " Commit every block"
 	}
 
 	gasSec := uint64(float64(gas-p.prevGasUsed) / interval.Seconds())
 	txSec := uint64(float64(txCount-p.prevTxCount) / interval.Seconds())
-	diffBlocks := max(int(outputBlockNum)-int(p.prevOutputBlockNum)+1, 0)
+	diffBlocks := max(int(outputBlockNum)-int(p.prevOutputBlockNum), 0)
 
 	p.logger.Info(fmt.Sprintf("[%s]"+suffix, p.logPrefix),
 		"blk", outputBlockNum,
@@ -140,7 +139,7 @@ func (p *Progress) Log(suffix string, rs *state.StateV3, in *state.QueueWithRetr
 func restoreTxNum(ctx context.Context, cfg *ExecuteBlockCfg, applyTx kv.Tx, doms *state2.SharedDomains, maxBlockNum uint64) (
 	inputTxNum uint64, maxTxNum uint64, offsetFromBlockBeginning uint64, err error) {
 
-	txNumsReader := rawdbv3.TxNums.WithCustomReadTxNumFunc(freezeblocks.ReadTxNumFuncFromBlockReader(ctx, cfg.blockReader))
+	txNumsReader := rawdbv3.TxNums.WithCustomReadTxNumFunc(freezeblocks.TxBlockIndexFromBlockReader(ctx, cfg.blockReader))
 
 	inputTxNum = doms.TxNum()
 
@@ -155,7 +154,7 @@ func restoreTxNum(ctx context.Context, cfg *ExecuteBlockCfg, applyTx kv.Tx, doms
 		return 0, 0, 0, err
 	}
 
-	ok, _blockNum, err := txNumsReader.FindBlockNum(applyTx, doms.TxNum())
+	_blockNum, ok, err := txNumsReader.FindBlockNum(applyTx, doms.TxNum())
 	if err != nil {
 		return 0, 0, 0, err
 	}
@@ -268,7 +267,6 @@ func ExecV3(ctx context.Context,
 		defer doms.Close()
 	}
 	txNumInDB := doms.TxNum()
-	doms.DiscardCommitment()
 
 	var (
 		inputTxNum               = doms.TxNum()
@@ -310,7 +308,7 @@ func ExecV3(ctx context.Context,
 			accumulator = shards.NewAccumulator()
 		}
 	}
-	rs := state.NewStateV3(doms, logger)
+	rs := state.NewStateV3(doms, cfg.syncCfg, cfg.chainConfig.Bor != nil, logger)
 
 	////TODO: owner of `resultCh` is main goroutine, but owner of `retryQueue` is applyLoop.
 	// Now rwLoop closing both (because applyLoop we completely restart)
@@ -436,19 +434,18 @@ func ExecV3(ctx context.Context,
 	agg.BuildFilesInBackground(outputTxNum.Load())
 
 	var readAhead chan uint64
-	if !parallel {
+	if !isMining && !inMemExec && execStage.CurrentSyncCycle.IsInitialCycle {
 		// snapshots are often stored on chaper drives. don't expect low-read-latency and manually read-ahead.
 		// can't use OS-level ReadAhead - because Data >> RAM
 		// it also warmsup state a bit - by touching senders/coninbase accounts and code
-		if !execStage.CurrentSyncCycle.IsInitialCycle {
-			var clean func()
+		var clean func()
 
-			readAhead, clean = blocksReadAhead(ctx, &cfg, 4, true)
-			defer clean()
-		}
+		readAhead, clean = blocksReadAhead(ctx, &cfg, 4)
+		defer clean()
 	}
 
 	var b *types.Block
+	var parent *types.Block
 
 	// Only needed by bor chains
 	shouldGenerateChangesetsForLastBlocks := cfg.chainConfig.Bor != nil
@@ -492,6 +489,18 @@ Loop:
 			return fmt.Errorf("nil block %d", blockNum)
 		}
 
+		var lastBlockTime uint64
+		if blockNum > 0 {
+			parent, err = blockWithSenders(ctx, cfg.db, executor.tx(), blockReader, blockNum-1)
+			if err != nil {
+				return err
+			}
+			if parent == nil {
+				return fmt.Errorf("nil parent block %d", blockNum-1)
+			}
+			lastBlockTime = parent.Time()
+		}
+
 		txs := b.Transactions()
 		header := b.HeaderNoCopy()
 		skipAnalysis := core.SkipAnalysis(chainConfig, blockNum)
@@ -505,6 +514,8 @@ Loop:
 		})
 		totalGasUsed += b.GasUsed()
 		blockContext := core.NewEVMBlockContext(header, getHashFn, cfg.engine, cfg.author /* author */, chainConfig)
+		gp := new(core.GasPool).AddGas(header.GasLimit).AddBlobGas(chainConfig.GetMaxBlobGasPerBlock(b.Time()))
+
 		// print type of engine
 		if parallel {
 			if err := executor.status(ctx, commitThreshold); err != nil {
@@ -524,7 +535,6 @@ Loop:
 		// Thus, we need to skip the first txs in the block, however, this causes the GasUsed to be incorrect.
 		// So we skip that check for the first block, if we find half-executed data.
 		skipPostEvaluation := false
-		var usedGas uint64
 		var systemTxIndex int
 
 		var txTasks []*state.TxTask
@@ -545,6 +555,7 @@ Loop:
 				GetHashFn:       getHashFn,
 				EvmBlockContext: blockContext,
 				Withdrawals:     b.Withdrawals(),
+				LastBlockTime:   lastBlockTime,
 
 				// use history reader instead of state reader to catch up to the tx where we left off
 				HistoryExecution: offsetFromBlockBeginning > 0 && txIndex < int(offsetFromBlockBeginning),
@@ -552,12 +563,6 @@ Loop:
 				BlockReceipts: blockReceipts,
 
 				Config: chainConfig,
-			}
-			if txTask.HistoryExecution && usedGas == 0 {
-				usedGas, _, _, err = rawtemporaldb.ReceiptAsOf(executor.tx().(kv.TemporalTx), txTask.TxNum)
-				if err != nil {
-					return err
-				}
 			}
 
 			if txIndex >= 0 && !txTask.Final && isPoSa {
@@ -572,7 +577,7 @@ Loop:
 				txTask.Config = cfg.genesis.Config
 			}
 
-			if txTask.TxNum <= txNumInDB && txTask.TxNum > 0 {
+			if txTask.TxNum <= txNumInDB && txTask.TxNum > 0 && !cfg.blockProduction {
 				inputTxNum++
 				skipPostEvaluation = true
 				continue
@@ -594,7 +599,7 @@ Loop:
 		}
 
 		if parallel {
-			if _, err := executor.execute(ctx, txTasks); err != nil {
+			if _, err := executor.execute(ctx, txTasks, nil /*gasPool*/); err != nil { // For now don't use block's gas pool for parallel
 				return err
 			}
 			agg.BuildFilesInBackground(outputTxNum.Load())
@@ -603,7 +608,7 @@ Loop:
 
 			se.skipPostEvaluation = skipPostEvaluation
 
-			continueLoop, err := se.execute(ctx, txTasks)
+			continueLoop, err := se.execute(ctx, txTasks, gp)
 
 			if err != nil {
 				return err
@@ -622,7 +627,7 @@ Loop:
 
 		mxExecBlocks.Add(1)
 
-		if shouldGenerateChangesets {
+		if shouldGenerateChangesets || cfg.syncCfg.KeepExecutionProofs {
 			aggTx := executor.tx().(state2.HasAggTx).AggTx().(*state2.AggregatorRoTx)
 			aggTx.RestrictSubsetFileDeletions(true)
 			start := time.Now()
@@ -642,13 +647,23 @@ Loop:
 
 			ts += time.Since(start)
 			aggTx.RestrictSubsetFileDeletions(false)
-			executor.domains().SavePastChangesetAccumulator(b.Hash(), blockNum, changeset)
-			if !inMemExec {
-				if err := state2.WriteDiffSet(executor.tx(), blockNum, b.Hash(), changeset); err != nil {
-					return err
+			if shouldGenerateChangesets {
+				executor.domains().SavePastChangesetAccumulator(b.Hash(), blockNum, changeset)
+				if !inMemExec {
+					if err := state2.WriteDiffSet(executor.tx(), blockNum, b.Hash(), changeset); err != nil {
+						return err
+					}
 				}
 			}
 			executor.domains().SetChangesetAccumulator(nil)
+
+			if cfg.syncCfg.PersistReceiptsV1 > 0 {
+				if len(txTasks) > 0 && txTasks[0].BlockReceipts != nil {
+					if err := rawdb.WriteReceiptsCache(executor.tx(), txTasks[0].BlockNum, txTasks[0].BlockHash, txTasks[0].BlockReceipts); err != nil {
+						return err
+					}
+				}
+			}
 		}
 
 		mxExecBlocks.Add(1)
@@ -702,6 +717,10 @@ Loop:
 				t1 = time.Since(tt) + ts
 
 				tt = time.Now()
+				if err = aggregatorRo.GreedyPruneHistory(ctx, kv.CommitmentDomain, executor.tx()); err != nil {
+					return err
+				}
+
 				if _, err := aggregatorRo.PruneSmallBatches(ctx, 10*time.Hour, executor.tx()); err != nil {
 					return err
 				}
@@ -766,7 +785,7 @@ func dumpPlainStateDebug(tx kv.RwTx, doms *state2.SharedDomains) {
 		doms.Flush(context.Background(), tx)
 	}
 	{
-		it, err := tx.(state2.HasAggTx).AggTx().(*state2.AggregatorRoTx).RangeLatest(tx, kv.AccountsDomain, nil, nil, -1)
+		it, err := tx.(state2.HasAggTx).AggTx().(*state2.AggregatorRoTx).DebugRangeLatest(tx, kv.AccountsDomain, nil, nil, -1)
 		if err != nil {
 			panic(err)
 		}
@@ -781,7 +800,7 @@ func dumpPlainStateDebug(tx kv.RwTx, doms *state2.SharedDomains) {
 		}
 	}
 	{
-		it, err := tx.(state2.HasAggTx).AggTx().(*state2.AggregatorRoTx).RangeLatest(tx, kv.StorageDomain, nil, nil, -1)
+		it, err := tx.(state2.HasAggTx).AggTx().(*state2.AggregatorRoTx).DebugRangeLatest(tx, kv.StorageDomain, nil, nil, -1)
 		if err != nil {
 			panic(1)
 		}
@@ -794,7 +813,7 @@ func dumpPlainStateDebug(tx kv.RwTx, doms *state2.SharedDomains) {
 		}
 	}
 	{
-		it, err := tx.(state2.HasAggTx).AggTx().(*state2.AggregatorRoTx).RangeLatest(tx, kv.CommitmentDomain, nil, nil, -1)
+		it, err := tx.(state2.HasAggTx).AggTx().(*state2.AggregatorRoTx).DebugRangeLatest(tx, kv.CommitmentDomain, nil, nil, -1)
 		if err != nil {
 			panic(1)
 		}
@@ -894,9 +913,6 @@ func flushAndCheckCommitmentV3(ctx context.Context, header *types.Header, applyT
 	}
 	if !inMemExec {
 		if err := doms.Flush(ctx, applyTx); err != nil {
-			return false, err
-		}
-		if err = applyTx.(state2.HasAggTx).AggTx().(*state2.AggregatorRoTx).PruneCommitHistory(ctx, applyTx, nil); err != nil {
 			return false, err
 		}
 	}

@@ -38,29 +38,26 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/erigontech/erigon-lib/common"
-	state2 "github.com/erigontech/erigon-lib/state"
-
 	"github.com/anacrolix/torrent"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/erigontech/erigon-lib/log/v3"
-
-	"github.com/erigontech/erigon-lib/diagnostics"
-	"github.com/erigontech/erigon-lib/kv/temporal"
-
 	"github.com/erigontech/erigon-lib/chain"
 	"github.com/erigontech/erigon-lib/chain/snapcfg"
+	"github.com/erigontech/erigon-lib/common"
 	"github.com/erigontech/erigon-lib/common/datadir"
 	"github.com/erigontech/erigon-lib/common/dbg"
 	"github.com/erigontech/erigon-lib/common/dir"
+	"github.com/erigontech/erigon-lib/diagnostics"
 	"github.com/erigontech/erigon-lib/downloader"
 	"github.com/erigontech/erigon-lib/downloader/snaptype"
 	"github.com/erigontech/erigon-lib/etl"
 	protodownloader "github.com/erigontech/erigon-lib/gointerfaces/downloaderproto"
 	"github.com/erigontech/erigon-lib/kv"
 	"github.com/erigontech/erigon-lib/kv/rawdbv3"
-	"github.com/erigontech/erigon-lib/state"
+	"github.com/erigontech/erigon-lib/kv/temporal"
+	"github.com/erigontech/erigon-lib/log/v3"
+	state2 "github.com/erigontech/erigon-lib/state"
+	"github.com/erigontech/erigon-lib/state/stats"
 	"github.com/erigontech/erigon/core/rawdb"
 	coresnaptype "github.com/erigontech/erigon/core/snaptype"
 	"github.com/erigontech/erigon/core/types"
@@ -190,6 +187,7 @@ func SpawnStageSnapshots(
 		defer tx.Rollback()
 	}
 	if err := DownloadAndIndexSnapshotsIfNeed(s, ctx, tx, cfg, logger); err != nil {
+		log.Error("DownloadAndIndexSnapshotsIfNeed", "err", err)
 		return err
 	}
 	var minProgress uint64
@@ -225,6 +223,9 @@ func SpawnStageSnapshots(
 	}
 	if cfg.chainConfig.Bor != nil && !cfg.blockReader.BorSnapshots().DownloadReady() {
 		cfg.blockReader.BorSnapshots().DownloadComplete()
+	}
+	if cfg.chainConfig.Parlia != nil && !cfg.blockReader.BscSnapshots().DownloadReady() {
+		cfg.blockReader.BscSnapshots().DownloadComplete()
 	}
 
 	return nil
@@ -281,27 +282,30 @@ func DownloadAndIndexSnapshotsIfNeed(s *StageState, ctx context.Context, tx kv.R
 		List:  subStages,
 	})
 
+	logger.Info(fmt.Sprintf("[%s] Download header-chain", s.LogPrefix()))
 	diagnostics.Send(diagnostics.CurrentSyncSubStage{SubStage: "Download header-chain"})
 	agg := cfg.db.(*temporal.DB).Agg().(*state2.Aggregator)
 	// Download only the snapshots that are for the header chain.
-	if err := snapshotsync.WaitForDownloader(ctx, s.LogPrefix(), cfg.dirs, true /*headerChain=*/, cfg.blobs, cfg.caplinState, cfg.prune, cstate, agg, tx, cfg.blockReader, &cfg.chainConfig, cfg.snapshotDownloader, s.state.StagesIdsList()); err != nil {
+	if err := snapshotsync.WaitForDownloader(ctx, s.LogPrefix(), cfg.dirs, true, cfg.blobs, cfg.caplinState, cfg.prune, cstate, agg, tx, cfg.blockReader, &cfg.chainConfig, cfg.snapshotDownloader, cfg.syncConfig); err != nil {
 		return err
 	}
 
-	if err := cfg.blockReader.Snapshots().OpenSegments([]snaptype.Type{coresnaptype.Headers, coresnaptype.Bodies}, true); err != nil {
+	if err := cfg.blockReader.Snapshots().OpenSegments([]snaptype.Type{coresnaptype.Headers, coresnaptype.Bodies}, true, false); err != nil {
 		return err
 	}
 
+	logger.Info(fmt.Sprintf("[%s] Download snapshots", s.LogPrefix()))
 	diagnostics.Send(diagnostics.CurrentSyncSubStage{SubStage: "Download snapshots"})
-	if err := snapshotsync.WaitForDownloader(ctx, s.LogPrefix(), cfg.dirs, false /*headerChain=*/, cfg.blobs, cfg.caplinState, cfg.prune, cstate, agg, tx, cfg.blockReader, &cfg.chainConfig, cfg.snapshotDownloader, s.state.StagesIdsList()); err != nil {
+	if err := snapshotsync.WaitForDownloader(ctx, s.LogPrefix(), cfg.dirs, false, cfg.blobs, cfg.caplinState, cfg.prune, cstate, agg, tx, cfg.blockReader, &cfg.chainConfig, cfg.snapshotDownloader, cfg.syncConfig); err != nil {
 		return err
 	}
 	if cfg.notifier.Events != nil {
 		cfg.notifier.Events.OnNewSnapshot()
 	}
 
+	logger.Info(fmt.Sprintf("[%s] E2 Indexing", s.LogPrefix()))
 	diagnostics.Send(diagnostics.CurrentSyncSubStage{SubStage: "E2 Indexing"})
-	if err := cfg.blockRetire.BuildMissedIndicesIfNeed(ctx, s.LogPrefix(), cfg.notifier.Events, &cfg.chainConfig); err != nil {
+	if err := cfg.blockRetire.BuildMissedIndicesIfNeed(ctx, s.LogPrefix(), cfg.notifier.Events); err != nil {
 		return err
 	}
 
@@ -311,6 +315,7 @@ func DownloadAndIndexSnapshotsIfNeed(s *StageState, ctx context.Context, tx kv.R
 		}
 	}
 
+	logger.Info(fmt.Sprintf("[%s] E3 Indexing", s.LogPrefix()))
 	indexWorkers := estimate.IndexSnapshot.Workers()
 	diagnostics.Send(diagnostics.CurrentSyncSubStage{SubStage: "E3 Indexing"})
 	if err := agg.BuildMissedIndices(ctx, indexWorkers); err != nil {
@@ -334,20 +339,21 @@ func DownloadAndIndexSnapshotsIfNeed(s *StageState, ctx context.Context, tx kv.R
 		s.BlockNumber = frozenBlocks
 	}
 
+	logger.Info(fmt.Sprintf("[%s] Fill DB", s.LogPrefix()))
 	diagnostics.Send(diagnostics.CurrentSyncSubStage{SubStage: "Fill DB"})
-	if err := FillDBFromSnapshots(s.LogPrefix(), ctx, tx, cfg.dirs, cfg.blockReader, agg, cfg.chainConfig, cfg.engine, logger); err != nil {
-		return err
+	if err := FillDBFromSnapshots(s.LogPrefix(), ctx, tx, cfg.dirs, cfg.blockReader, cfg.chainConfig, cfg.engine, logger); err != nil {
+		return fmt.Errorf("FillDBFromSnapshots: %w", err)
 	}
 
 	if temporal, ok := tx.(*temporal.Tx); ok {
 		temporal.ForceReopenAggCtx() // otherwise next stages will not see just-indexed-files
 	}
 
-	{
-		cfg.blockReader.Snapshots().LogStat("download")
-		txNumsReader := rawdbv3.TxNums.WithCustomReadTxNumFunc(freezeblocks.ReadTxNumFuncFromBlockReader(ctx, cfg.blockReader))
-		tx.(state.HasAggTx).AggTx().(*state.AggregatorRoTx).LogStats(tx, func(endTxNumMinimax uint64) (uint64, error) {
-			_, histBlockNumProgress, err := txNumsReader.FindBlockNum(tx, endTxNumMinimax)
+	cfg.blockReader.Snapshots().LogStat("download")
+	txNumsReader := rawdbv3.TxNums.WithCustomReadTxNumFunc(freezeblocks.TxBlockIndexFromBlockReader(ctx, cfg.blockReader))
+	if temporal, ok := tx.(*temporal.Tx); ok {
+		stats.LogStats(temporal, logger, func(endTxNumMinimax uint64) (uint64, error) {
+			histBlockNumProgress, _, err := txNumsReader.FindBlockNum(tx, endTxNumMinimax)
 			return histBlockNumProgress, err
 		})
 	}
@@ -366,7 +372,7 @@ func getPruneMarkerSafeThreshold(blockReader services.FullBlockReader) uint64 {
 	return snapProgress - pruneMarkerSafeThreshold
 }
 
-func FillDBFromSnapshots(logPrefix string, ctx context.Context, tx kv.RwTx, dirs datadir.Dirs, blockReader services.FullBlockReader, agg *state.Aggregator, chainConfig chain.Config, engine consensus.Engine, logger log.Logger) error {
+func FillDBFromSnapshots(logPrefix string, ctx context.Context, tx kv.RwTx, dirs datadir.Dirs, blockReader services.FullBlockReader, chainConfig chain.Config, engine consensus.Engine, logger log.Logger) error {
 	startTime := time.Now()
 	blocksAvailable := blockReader.FrozenBlocks()
 	logEvery := time.NewTicker(logInterval)
@@ -374,6 +380,9 @@ func FillDBFromSnapshots(logPrefix string, ctx context.Context, tx kv.RwTx, dirs
 	pruneMarkerBlockThreshold := getPruneMarkerSafeThreshold(blockReader)
 
 	// updating the progress of further stages (but only forward) that are contained inside of snapshots
+	// We don't set StageExec progress here - even that we have a lot of state snapshots, because:
+	//   state files (.kv/.v/.ef) may be at "half-block" progress (sharded by `txNum`). And only StageExec
+	//   has logic to handle this corner-case right
 	for _, stage := range []stages.SyncStage{stages.Headers, stages.Bodies, stages.BlockHashes, stages.Senders} {
 		progress, err := stages.GetStageProgress(tx, stage)
 

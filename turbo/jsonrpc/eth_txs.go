@@ -56,7 +56,7 @@ func (api *APIImpl) GetTransactionByHash(ctx context.Context, txnHash common.Has
 		return nil, err
 	}
 
-	txNumsReader := rawdbv3.TxNums.WithCustomReadTxNumFunc(freezeblocks.ReadTxNumFuncFromBlockReader(ctx, api._blockReader))
+	txNumsReader := rawdbv3.TxNums.WithCustomReadTxNumFunc(freezeblocks.TxBlockIndexFromBlockReader(ctx, api._blockReader))
 
 	// Private API returns 0 if transaction is not found.
 	if blockNum == 0 && chainConfig.Bor != nil {
@@ -67,7 +67,7 @@ func (api *APIImpl) GetTransactionByHash(ctx context.Context, txnHash common.Has
 				if err != nil {
 					return nil, err
 				}
-				txNum = txNumNextBlock - 1
+				txNum = txNumNextBlock
 			}
 		} else {
 			blockNum, ok, err = api._blockReader.EventLookup(ctx, tx, txnHash)

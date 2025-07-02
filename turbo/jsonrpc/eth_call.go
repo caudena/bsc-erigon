@@ -49,7 +49,6 @@ import (
 	"github.com/erigontech/erigon/core/state"
 	"github.com/erigontech/erigon/core/types"
 	"github.com/erigontech/erigon/core/vm"
-	"github.com/erigontech/erigon/core/vm/evmtypes"
 	"github.com/erigontech/erigon/eth/stagedsync"
 	"github.com/erigontech/erigon/eth/tracers/logger"
 	"github.com/erigontech/erigon/params"
@@ -89,7 +88,7 @@ func (api *APIImpl) Call(ctx context.Context, args ethapi2.CallArgs, blockNrOrHa
 		return nil, err
 	}
 	if block == nil {
-		return nil, nil
+		return nil, errors.New("block not found")
 	}
 
 	stateReader, err := rpchelper.CreateStateReader(ctx, tx, api._blockReader, blockNrOrHash, 0, api.filters, api.stateCache, chainConfig.ChainName)
@@ -151,49 +150,59 @@ func (api *APIImpl) EstimateGas(ctx context.Context, argsOrNil *ethapi2.CallArgs
 	}
 	defer dbtx.Rollback()
 
+	// Use latest block by default
+	if blockNrOrHash == nil {
+		blockNrOrHash = &latestNumOrHash
+	}
+
 	chainConfig, err := api.chainConfig(ctx, dbtx)
 	if err != nil {
 		return 0, err
 	}
 	engine := api.engine()
 
-	latestCanBlockNumber, latestCanHash, isLatest, err := rpchelper.GetCanonicalBlockNumber(ctx, latestNumOrHash, dbtx, api._blockReader, api.filters) // DoCall cannot be executed on non-canonical blocks
+	blockNum, blockHash, isLatest, err := rpchelper.GetCanonicalBlockNumber(ctx, *blockNrOrHash, dbtx, api._blockReader, api.filters) // DoCall cannot be executed on non-canonical blocks
 	if err != nil {
 		return 0, err
 	}
 
+	block := api.tryBlockFromLru(blockHash)
+
 	// try and get the block from the lru cache first then try DB before failing
-	block := api.tryBlockFromLru(latestCanHash)
 	if block == nil {
-		block, err = api.blockWithSenders(ctx, dbtx, latestCanHash, latestCanBlockNumber)
+		block, err = api.blockWithSenders(ctx, dbtx, blockHash, blockNum)
 		if err != nil {
 			return 0, err
 		}
 	}
+
+	// try to check if it is a pending block
 	if block == nil {
-		return 0, errors.New("could not find latest block in cache or db")
+		b := api.filters.LastPendingBlock()
+		if b != nil && blockNum == b.NumberU64() {
+			block = b
+		}
 	}
 
-	txNumsReader := rawdbv3.TxNums.WithCustomReadTxNumFunc(freezeblocks.ReadTxNumFuncFromBlockReader(ctx, api._blockReader))
-	stateReader, err := rpchelper.CreateStateReaderFromBlockNumber(ctx, dbtx, txNumsReader, latestCanBlockNumber, isLatest, 0, api.stateCache, chainConfig.ChainName)
+	if block == nil {
+		return 0, errors.New(fmt.Sprintf("could not find the block %s in cache or db", blockNrOrHash.String()))
+	}
+	header := block.HeaderNoCopy()
+
+	txNumsReader := rawdbv3.TxNums.WithCustomReadTxNumFunc(freezeblocks.TxBlockIndexFromBlockReader(ctx, api._blockReader))
+	stateReader, err := rpchelper.CreateStateReaderFromBlockNumber(ctx, dbtx, txNumsReader, blockNum, isLatest, 0, api.stateCache, chainConfig.ChainName)
 	if err != nil {
 		return 0, err
 	}
 
 	// Binary search the gas requirement, as it may be higher than the amount used
 	var (
-		lo     = params.TxGas - 1
-		hi     uint64
-		gasCap uint64
+		lo uint64
+		hi uint64
 	)
 	// Use zero address if sender unspecified.
 	if args.From == nil {
 		args.From = new(libcommon.Address)
-	}
-
-	bNrOrHash := rpc.BlockNumberOrHashWithNumber(rpc.PendingBlockNumber)
-	if blockNrOrHash != nil {
-		bNrOrHash = *blockNrOrHash
 	}
 
 	// Determine the highest gas limit can be used during the estimation.
@@ -201,26 +210,12 @@ func (api *APIImpl) EstimateGas(ctx context.Context, argsOrNil *ethapi2.CallArgs
 		hi = uint64(*args.Gas)
 	} else {
 		// Retrieve the block to act as the gas ceiling
-		h, err := headerByNumberOrHash(ctx, dbtx, bNrOrHash, api)
-		if err != nil {
-			return 0, err
-		}
-		if h == nil {
-			// if a block number was supplied and there is no header return 0
-			if blockNrOrHash != nil {
-				return 0, nil
-			}
-
-			// block number not supplied, so we haven't found a pending block, read the latest block instead
-			h, err = headerByNumberOrHash(ctx, dbtx, latestNumOrHash, api)
-			if err != nil {
-				return 0, err
-			}
-			if h == nil {
-				return 0, nil
-			}
-		}
-		hi = h.GasLimit
+		hi = header.GasLimit
+	}
+	// Recap the highest gas allowance with specified gascap.
+	if hi > api.GasCap {
+		log.Warn("Caller gas above allowance, capping", "requested", hi, "cap", api.GasCap)
+		hi = api.GasCap
 	}
 
 	var feeCap *big.Int
@@ -265,68 +260,53 @@ func (api *APIImpl) EstimateGas(ctx context.Context, argsOrNil *ethapi2.CallArgs
 		}
 	}
 
-	// Recap the highest gas allowance with specified gascap.
-	if hi > api.GasCap {
-		log.Warn("Caller gas above allowance, capping", "requested", hi, "cap", api.GasCap)
-		hi = api.GasCap
-	}
-	gasCap = hi
-
-	header := block.HeaderNoCopy()
-
-	caller, err := transactions.NewReusableCaller(engine, stateReader, overrides, header, args, api.GasCap, latestNumOrHash, dbtx, api._blockReader, chainConfig, api.evmCallTimeout)
+	caller, err := transactions.NewReusableCaller(engine, stateReader, overrides, header, args, api.GasCap, *blockNrOrHash, dbtx, api._blockReader, chainConfig, api.evmCallTimeout)
 	if err != nil {
 		return 0, err
 	}
 
-	// Create a helper to check if a gas allowance results in an executable transaction
-	executable := func(gas uint64) (bool, *evmtypes.ExecutionResult, error) {
-		result, err := caller.DoCallWithNewGas(ctx, gas)
-		if err != nil {
-			if errors.Is(err, core.ErrIntrinsicGas) {
-				// Special case, raise gas limit
-				return true, nil, nil
-			}
-
-			// Bail out
-			return true, nil, err
-		}
-		return result.Failed(), result, nil
+	// First try with highest gas possible
+	result, err := caller.DoCallWithNewGas(ctx, hi, engine, overrides)
+	if err != nil || result == nil {
+		return 0, err
 	}
+	if result.Failed() {
+		if !errors.Is(result.Err, vm.ErrOutOfGas) {
+			if len(result.Revert()) > 0 {
+				return 0, ethapi2.NewRevertError(result)
+			}
+			return 0, result.Err
+		}
+		// Otherwise, the specified gas cap is too low
+		return 0, fmt.Errorf("gas required exceeds allowance (%d)", hi)
+	}
+	// Assuming a contract can freely run all the instructions, we have
+	// the true amount of gas it wants to consume to execute fully.
+	// We want to ensure that the gas used doesn't fall below this
+	trueGas := result.UsedGas
+	lo = max(trueGas+result.EvmRefund-1, params.TxGas-1)
 
+	i := 0
 	// Execute the binary search and hone in on an executable gas limit
 	for lo+1 < hi {
 		mid := (hi + lo) / 2
-		failed, _, err := executable(mid)
+		if mid < trueGas {
+			lo = mid
+			continue
+		}
+		result, err := caller.DoCallWithNewGas(ctx, mid, engine, overrides)
 		// If the error is not nil(consensus error), it means the provided message
 		// call or transaction will never be accepted no matter how much gas it is
 		// assigened. Return the error directly, don't struggle any more.
-		if err != nil {
+		if err != nil && !errors.Is(err, core.ErrIntrinsicGas) {
 			return 0, err
 		}
-		if failed {
+		if errors.Is(err, core.ErrIntrinsicGas) || result.Failed() || result.UsedGas < trueGas {
 			lo = mid
 		} else {
 			hi = mid
 		}
-	}
-
-	// Reject the transaction as invalid if it still fails at the highest allowance
-	if hi == gasCap {
-		failed, result, err := executable(hi)
-		if err != nil {
-			return 0, err
-		}
-		if failed {
-			if result != nil && !errors.Is(result.Err, vm.ErrOutOfGas) {
-				if len(result.Revert()) > 0 {
-					return 0, ethapi2.NewRevertError(result)
-				}
-				return 0, result.Err
-			}
-			// Otherwise, the specified gas cap is too low
-			return 0, fmt.Errorf("gas required exceeds allowance (%d)", gasCap)
-		}
+		i++
 	}
 	return hexutil.Uint64(hi), nil
 }
@@ -346,34 +326,56 @@ func (api *APIImpl) GetProof(ctx context.Context, address libcommon.Address, sto
 		return nil, errors.New("block not found")
 	}
 
-	latestBlock, err := rpchelper.GetLatestBlockNumber(roTx)
-	if err != nil {
-		return nil, err
-	}
-
-	if requestedBlockNr != latestBlock {
-		return nil, errors.New("proofs are available only for the 'latest' block")
-	}
-
 	storageKeysConverted := make([]libcommon.Hash, len(storageKeys))
 	for i, s := range storageKeys {
 		storageKeysConverted[i].SetBytes(s)
 	}
-	return api.getProof(ctx, &roTx, address, storageKeysConverted, rpc.BlockNumberOrHashWithNumber(rpc.BlockNumber(latestBlock)), api.db, api.logger)
+	return api.getProof(ctx, roTx, address, storageKeysConverted, rpc.BlockNumberOrHashWithNumber(rpc.BlockNumber(requestedBlockNr)), api.db, api.logger)
 }
 
-func (api *APIImpl) getProof(ctx context.Context, roTx *kv.Tx, address libcommon.Address, storageKeys []libcommon.Hash, blockNrOrHash rpc.BlockNumberOrHash, db kv.RoDB, logger log.Logger) (*accounts.AccProofResult, error) {
+func (api *APIImpl) getProof(ctx context.Context, roTx kv.Tx, address libcommon.Address, storageKeys []libcommon.Hash, blockNrOrHash rpc.BlockNumberOrHash, db kv.RoDB, logger log.Logger) (*accounts.AccProofResult, error) {
+	tx, err := api.db.BeginTemporalRo(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
 	// get the root hash from header to validate proofs along the way
-	header, err := api._blockReader.HeaderByNumber(ctx, *roTx, blockNrOrHash.BlockNumber.Uint64())
+	header, err := api._blockReader.HeaderByNumber(ctx, roTx, blockNrOrHash.BlockNumber.Uint64())
 	if err != nil {
 		return nil, err
 	}
 
-	domains, err := libstate.NewSharedDomains(*roTx, log.New())
+	domains, err := libstate.NewSharedDomains(roTx, log.New())
 	if err != nil {
 		return nil, err
 	}
 	sdCtx := domains.GetCommitmentContext()
+
+	latestBlock, err := rpchelper.GetLatestBlockNumber(roTx)
+	if err != nil {
+		return nil, err
+	}
+	if latestBlock < blockNrOrHash.BlockNumber.Uint64() {
+		return nil, fmt.Errorf("block number is in the future latest=%d requested=%d", latestBlock, blockNrOrHash.BlockNumber.Uint64())
+	}
+	if blockNrOrHash.BlockNumber.Uint64() < latestBlock {
+		// Get first txnum of blockNumber+1 to ensure that correct state root will be restored as of blockNumber has been executed
+		lastTxnInBlock, err := rawdbv3.TxNums.WithCustomReadTxNumFunc(freezeblocks.TxBlockIndexFromBlockReader(ctx, api._blockReader)).Min(tx, blockNrOrHash.BlockNumber.Uint64()+1)
+		if err != nil {
+			return nil, err
+		}
+		commitmentStartingTxNum := tx.HistoryStartFrom(kv.CommitmentDomain)
+		if lastTxnInBlock < commitmentStartingTxNum {
+			return nil, state.PrunedError
+		}
+
+		sdCtx.SetLimitReadAsOfTxNum(lastTxnInBlock, false)
+		// domains.SetTrace(true)
+		if _, err := domains.SeekCommitment(context.Background(), roTx); err != nil {
+			return nil, err
+		}
+		domains.SetTrace(false)
+	}
 
 	// touch account
 	sdCtx.TouchKey(kv.AccountsDomain, string(address.Bytes()), nil)
@@ -433,11 +435,6 @@ func (api *APIImpl) getProof(ctx context.Context, roTx *kv.Tx, address libcommon
 		}
 	}
 
-	tx, err := api.db.BeginTemporalRo(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
 	reader, err := rpchelper.CreateStateReader(ctx, tx, api._blockReader, blockNrOrHash, 0, api.filters, api.stateCache, "")
 	if err != nil {
 		return nil, err
@@ -760,7 +757,7 @@ func (api *APIImpl) CreateAccessList(ctx context.Context, args ethapi2.CallArgs,
 		return nil, nil
 	}
 	var stateReader state.StateReader
-	txNumsReader := rawdbv3.TxNums.WithCustomReadTxNumFunc(freezeblocks.ReadTxNumFuncFromBlockReader(ctx, api._blockReader))
+	txNumsReader := rawdbv3.TxNums.WithCustomReadTxNumFunc(freezeblocks.TxBlockIndexFromBlockReader(ctx, api._blockReader))
 
 	if latest {
 		cacheView, err := api.stateCache.View(ctx, tx)
@@ -839,15 +836,13 @@ func (api *APIImpl) CreateAccessList(ctx context.Context, args ethapi2.CallArgs,
 		// Set the accesslist to the last al
 		args.AccessList = &accessList
 
-		var msg types.Message
-
 		var baseFee *uint256.Int = nil
 		// check if EIP-1559
 		if header.BaseFee != nil {
 			baseFee, _ = uint256.FromBig(header.BaseFee)
 		}
 
-		msg, err = args.ToMessage(api.GasCap, baseFee)
+		msg, err := args.ToMessage(api.GasCap, baseFee)
 		if err != nil {
 			return nil, err
 		}
@@ -860,7 +855,7 @@ func (api *APIImpl) CreateAccessList(ctx context.Context, args ethapi2.CallArgs,
 
 		evm := vm.NewEVM(blockCtx, txCtx, state, chainConfig, config)
 		gp := new(core.GasPool).AddGas(msg.Gas()).AddBlobGas(msg.BlobGas())
-		res, err := core.ApplyMessage(evm, msg, gp, true /* refunds */, false /* gasBailout */)
+		res, err := core.ApplyMessage(evm, msg, gp, true /* refunds */, false /* gasBailout */, engine)
 		if err != nil {
 			return nil, err
 		}

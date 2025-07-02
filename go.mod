@@ -1,6 +1,8 @@
 module github.com/erigontech/erigon
 
-go 1.22.5
+go 1.23.0
+
+toolchain go1.23.6
 
 replace github.com/erigontech/erigon-lib => ./erigon-lib
 
@@ -8,14 +10,14 @@ replace (
 	github.com/anacrolix/torrent => github.com/erigontech/torrent v1.54.3-alpha-1
 	github.com/cometbft/cometbft => github.com/bnb-chain/greenfield-cometbft v1.3.1
 	github.com/crate-crypto/go-kzg-4844 => github.com/erigontech/go-kzg-4844 v0.0.0-20250130131058-ce13be60bc86
-	github.com/erigontech/erigon-snapshot => github.com/node-real/bsc-erigon-snapshot v1.0.1-0.20241224070108-6fa500c226f9
+	github.com/erigontech/erigon-snapshot => github.com/node-real/bsc-erigon-snapshot v1.0.1-0.20250626032909-39f3dba4611c
 	github.com/holiman/bloomfilter/v2 => github.com/AskAlexSharov/bloomfilter/v2 v2.0.9
 	github.com/tendermint/tendermint => github.com/bnb-chain/tendermint v0.31.16
 )
 
 require (
 	github.com/erigontech/erigonwatch v0.0.0-20240718131902-b6576bde1116
-	github.com/erigontech/mdbx-go v0.38.6-0.20250205222432-e4dd01978d7f
+	github.com/erigontech/mdbx-go v0.39.8
 	github.com/erigontech/secp256k1 v1.1.0
 	github.com/erigontech/silkworm-go v0.18.0
 )
@@ -23,7 +25,7 @@ require (
 require (
 	gfx.cafe/util/go/generic v0.0.0-20230721185457-c559e86c829c
 	github.com/99designs/gqlgen v0.17.63
-	github.com/Giulio2002/bls v0.0.0-20241116091023-2ddcc8954ec0
+	github.com/Giulio2002/bls v0.0.0-20250218151206-daa74641714d
 	github.com/Masterminds/sprig/v3 v3.2.3
 	github.com/RoaringBitmap/roaring/v2 v2.4.3
 	github.com/alecthomas/kong v0.8.1
@@ -54,6 +56,7 @@ require (
 	github.com/golang/snappy v0.0.5-0.20220116011046-fa5810519dcb
 	github.com/google/btree v1.1.3
 	github.com/google/cel-go v0.18.2
+	github.com/google/go-cmp v0.6.0
 	github.com/google/gofuzz v1.2.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/grpc-ecosystem/go-grpc-middleware v1.4.0
@@ -66,7 +69,7 @@ require (
 	github.com/jedib0t/go-pretty/v6 v6.5.9
 	github.com/json-iterator/go v1.1.12
 	github.com/julienschmidt/httprouter v1.3.0
-	github.com/klauspost/compress v1.17.11
+	github.com/klauspost/compress v1.18.0
 	github.com/libp2p/go-libp2p v0.37.2
 	github.com/libp2p/go-libp2p-mplex v0.9.0
 	github.com/libp2p/go-libp2p-pubsub v0.11.0
@@ -103,7 +106,7 @@ require (
 	golang.org/x/exp v0.0.0-20250128182459-e0ece0dbea4c
 	golang.org/x/net v0.34.0
 	golang.org/x/sync v0.10.0
-	golang.org/x/sys v0.29.0
+	golang.org/x/sys v0.31.0
 	golang.org/x/time v0.9.0
 	google.golang.org/grpc v1.69.4
 	google.golang.org/grpc/cmd/protoc-gen-go-grpc v1.5.1
@@ -158,12 +161,12 @@ require (
 	github.com/anacrolix/dht/v2 v2.21.1 // indirect
 	github.com/anacrolix/envpprof v1.3.0 // indirect
 	github.com/anacrolix/generics v0.0.2-0.20240227122613-f95486179cab // indirect
-	github.com/anacrolix/go-libutp v1.3.1 // indirect
+	github.com/anacrolix/go-libutp v1.3.2 // indirect
 	github.com/anacrolix/log v0.15.2 // indirect
 	github.com/anacrolix/missinggo v1.3.0 // indirect
 	github.com/anacrolix/missinggo/perf v1.0.0 // indirect
 	github.com/anacrolix/missinggo/v2 v2.7.3 // indirect
-	github.com/anacrolix/mmsg v1.0.0 // indirect
+	github.com/anacrolix/mmsg v1.0.1 // indirect
 	github.com/anacrolix/multiless v0.3.1-0.20221221005021-2d12701f83f7 // indirect
 	github.com/anacrolix/stm v0.4.1-0.20221221005312-96d17df0e496 // indirect
 	github.com/anacrolix/upnp v0.1.3-0.20220123035249-922794e51c96 // indirect
@@ -189,7 +192,7 @@ require (
 	github.com/docker/go-units v0.5.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/elastic/gosigar v0.14.3 // indirect
-	github.com/erigontech/erigon-snapshot v1.3.1-0.20250121111444-6cc4c0c1fb89 // indirect
+	github.com/erigontech/erigon-snapshot v1.3.1-0.20250502073210-6c1e7e3d5165 // indirect
 	github.com/flynn/noise v1.1.0 // indirect
 	github.com/francoispqt/gojay v1.2.13 // indirect
 	github.com/fsnotify/fsnotify v1.6.0 // indirect
@@ -290,7 +293,7 @@ require (
 	github.com/spaolacci/murmur3 v1.1.0 // indirect
 	github.com/spf13/cast v1.5.0 // indirect
 	github.com/stoewer/go-strcase v1.2.0 // indirect
-	github.com/supranational/blst v0.3.13
+	github.com/supranational/blst v0.3.14
 	github.com/xrash/smetrics v0.0.0-20240521201337-686a1a2994c1 // indirect
 	go.etcd.io/bbolt v1.3.9 // indirect
 	go.opentelemetry.io/otel v1.31.0 // indirect

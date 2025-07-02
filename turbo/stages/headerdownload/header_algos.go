@@ -458,7 +458,7 @@ func (hd *HeaderDownload) requestMoreHeadersForPOS(currentTime time.Time) (timeo
 		return
 	}
 
-	hd.logger.Debug("[downloader] Request header", "number", anchor.blockHeight-1, "length", 192)
+	hd.logger.Trace("[downloader] Request header", "number", anchor.blockHeight-1, "length", 192)
 
 	// Request ancestors
 	request = &HeaderRequest{
@@ -559,7 +559,7 @@ func (hd *HeaderDownload) InsertHeader(hf FeedHeaderFunc, terminalTotalDifficult
 				hd.badPoSHeaders[link.hash] = link.header.ParentHash
 				if errors.Is(err, consensus.ErrFutureBlock) {
 					// This may become valid later
-					hd.logger.Warn("[downloader] Added future link", "hash", link.hash, "height", link.blockHeight, "timestamp", link.header.Time)
+					hd.logger.Warn("[downloader] Added future link", "hash", link.hash, "height", link.blockHeight, "timestamp", link.header.Time, "err", err)
 					return false, false, 0, lastTime, nil // prevent removal of the link from the hd.linkQueue
 				} else {
 					hd.logger.Debug("[downloader] Verification failed for header", "hash", link.hash, "height", link.blockHeight, "err", err)
@@ -578,7 +578,7 @@ func (hd *HeaderDownload) InsertHeader(hf FeedHeaderFunc, terminalTotalDifficult
 		default:
 		}
 
-		metrics.UpdateBlockConsumerHeaderDownloadDelay(link.header.Time, link.header.Number.Uint64(), hd.logger)
+		metrics.UpdateBlockConsumerHeaderDownloadDelay(link.header.MilliTimestamp(), link.header.Number.Uint64(), hd.logger)
 
 		td, err := hf(link.header, link.headerRaw, hd.highestHashInDb, hd.highestInDb)
 		if err != nil {
@@ -609,6 +609,7 @@ func (hd *HeaderDownload) InsertHeader(hf FeedHeaderFunc, terminalTotalDifficult
 			}
 			hd.highestInDb = link.blockHeight
 			hd.highestHashInDb = link.hash
+			hd.LastBlockTime = link.header.MilliTimestamp()
 		}
 		lastTime = link.header.Time
 		link.persisted = true

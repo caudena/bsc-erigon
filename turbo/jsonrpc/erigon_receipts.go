@@ -22,12 +22,12 @@ import (
 	"fmt"
 
 	"github.com/RoaringBitmap/roaring/v2"
+	"github.com/erigontech/erigon/execution/exec3"
 
 	"github.com/erigontech/erigon-lib/common"
 	"github.com/erigontech/erigon-lib/kv/order"
 	"github.com/erigontech/erigon-lib/kv/rawdbv3"
 	"github.com/erigontech/erigon-lib/log/v3"
-	"github.com/erigontech/erigon/cmd/state/exec3"
 	"github.com/erigontech/erigon/core/types"
 	"github.com/erigontech/erigon/eth/ethutils"
 	"github.com/erigontech/erigon/eth/filters"
@@ -192,7 +192,7 @@ func (api *ErigonImpl) GetLatestLogs(ctx context.Context, crit filters.FilterCri
 	exec := exec3.NewTraceWorker(tx, chainConfig, api.engine(), api._blockReader, nil)
 	defer exec.Close()
 
-	txNumsReader := rawdbv3.TxNums.WithCustomReadTxNumFunc(freezeblocks.ReadTxNumFuncFromBlockReader(ctx, api._blockReader))
+	txNumsReader := rawdbv3.TxNums.WithCustomReadTxNumFunc(freezeblocks.TxBlockIndexFromBlockReader(ctx, api._blockReader))
 	txNumbers, err := applyFiltersV3(txNumsReader, tx, begin, end, crit)
 	if err != nil {
 		return erigonLogs, err

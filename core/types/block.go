@@ -25,6 +25,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"github.com/holiman/uint256"
 	"io"
 	"math/big"
 	"reflect"
@@ -39,13 +40,15 @@ import (
 	"github.com/erigontech/erigon-lib/rlp"
 )
 
+const (
+	ExtraVanityLength = 32 // Fixed number of extra-data prefix bytes reserved for signer vanity
+	ExtraSealLength   = 65 // Fixed number of extra-data suffix bytes reserved for signer seal
+)
+
 var (
 	EmptyRootHash     = libcommon.HexToHash("56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421")
 	EmptyRequestsHash = libcommon.HexToHash("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855") // sha256.Sum256([]byte(""))
 	EmptyUncleHash    = rlpHash([]*Header(nil))
-
-	ExtraVanityLength = 32 // Fixed number of extra-data prefix bytes reserved for signer vanity
-	ExtraSealLength   = 65 // Fixed number of extra-data suffix bytes reserved for signer seal
 )
 
 // A BlockNonce is a 64-bit hash which proves (combined with the
@@ -592,6 +595,20 @@ func (h *Header) Hash() (hash libcommon.Hash) {
 		h.hash.Store(&hash)
 	}
 	return hash
+}
+
+// SetMilliseconds can be called once millisecond representation supported
+func (h *Header) SetMilliseconds(milliseconds uint64) {
+	h.MixDigest = libcommon.Hash(uint256.NewInt(milliseconds % 1000).Bytes32())
+}
+
+// Ensure Milliseconds is less than 1000 when verifying the block header
+func (h *Header) MilliTimestamp() uint64 {
+	milliseconds := uint64(0)
+	if h.MixDigest != (libcommon.Hash{}) {
+		milliseconds = uint256.NewInt(0).SetBytes32(h.MixDigest[:]).Uint64()
+	}
+	return h.Time*1000 + milliseconds
 }
 
 var headerSize = libcommon.StorageSize(reflect.TypeOf(Header{}).Size())

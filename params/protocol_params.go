@@ -129,11 +129,12 @@ const (
 	// Introduced in Tangerine Whistle (Eip 150)
 	CreateBySelfdestructGas uint64 = 25000
 
-	BaseFeeChangeDenominator          = 8          // Bounds the amount the base fee can change between blocks.
-	BaseFeeChangeDenominatorPostDelhi = 16         // Bounds the amount the base fee can change between blocks post delhi hard fork for polygon networks.
-	ElasticityMultiplier              = 2          // Bounds the maximum gas limit an EIP-1559 block may have.
-	InitialBaseFee                    = 1000000000 // Initial base fee for EIP-1559 blocks.
-	InitialBaseFeeForBSC              = 0          // Initial base fee for EIP-1559 blocks on bsc Mainnet
+	BaseFeeChangeDenominator           = 8          // Bounds the amount the base fee can change between blocks.
+	BaseFeeChangeDenominatorPostDelhi  = 16         // Bounds the amount the base fee can change between blocks post delhi hard fork for polygon networks.
+	BaseFeeChangeDenominatorPostBhilai = 64         // Bounds the amount the base fee can change between blocks post bhilai hard fork for polygon networks.
+	ElasticityMultiplier               = 2          // Bounds the maximum gas limit an EIP-1559 block may have.
+	InitialBaseFee                     = 1000000000 // Initial base fee for EIP-1559 blocks.
+	InitialBaseFeeForBSC               = 0          // Initial base fee for EIP-1559 blocks on bsc Mainnet
 
 	MaxCodeSize              = 24576           // Maximum bytecode to permit for a contract
 	MaxCodeSizePostAhmedabad = 32768           // Maximum bytecode to permit for a contract post Ahmedabad hard fork (bor / polygon pos) (32KB)
@@ -194,10 +195,13 @@ const (
 	BlobTxPointEvaluationPrecompileGas = 50000   // Gas price for the point evaluation precompile.
 
 	BlobTxTargetBlobGasPerBlock = 3 * BlobTxBlobGasPerBlob // Target consumable blob gas for data blobs per block (for 1559-like pricing)
-	MaxBlobGasPerBlock          = 6 * BlobTxBlobGasPerBlob // Maximum consumable blob gas for data blobs per block
 
-	MinBlocksForBlobRequests           uint64 = 524288              // it keeps blob data available for ~18.2 days in local, ref: https://github.com/bnb-chain/BEPs/blob/master/BEPs/BEP-336.md#51-parameters.
-	DefaultExtraReserveForBlobRequests uint64 = 1 * (24 * 3600) / 3 // it adds more time for expired blobs for some request cases, like expiry blob when remote peer is syncing, default 1 day.
+	// lorentzBlockInterval                      = 0.75
+	MinTimeDurationForBlobRequests     uint64 = uint64(float64(24*3600) * 18.2)                        // it keeps blob data available for 18.2 days in local
+	MinBlocksForBlobRequests           uint64 = uint64(float64(MinTimeDurationForBlobRequests) / 0.75) // ref: https://github.com/bnb-chain/BEPs/blob/master/BEPs/BEP-524.md#421-change-table.
+	DefaultExtraReserveForBlobRequests uint64 = uint64(24 * 3600 / 0.75)                               // it adds more time for expired blobs for some request cases, like expiry blob when remote peer is syncing, default 1 day.
+
+	BreatheBlockInterval uint64 = 24 * 3600 // Controls the interval for updateValidatorSetV2
 
 	// used for testing:
 	//     [1,9] except 2 --> used as turn length directly
@@ -211,6 +215,14 @@ const (
 
 	// EIP-7702
 	SetCodeMagicPrefix = byte(0x05)
+
+	//Bsc
+	DefaultEpochLength   uint64 = 200  // Default number of blocks of checkpoint to update validatorSet from contract
+	LorentzEpochLength   uint64 = 500  // Epoch length starting from the Lorentz hard fork
+	MaxwellEpochLength   uint64 = 1000 // Epoch length starting from the Maxwell hard fork
+	DefaultBlockInterval uint64 = 3000 // Default block interval in milliseconds
+	LorentzBlockInterval uint64 = 1500 // Block interval starting from the Lorentz hard fork
+	MaxwellBlockInterval uint64 = 750  // Block interval starting from the Maxwell hard fork
 )
 
 // EIP-7702: Set EOA account code
@@ -243,7 +255,3 @@ var (
 	MinimumDifficulty      = big.NewInt(131072) // The minimum that the difficulty may ever be.
 	DurationLimit          = big.NewInt(13)     // The decision boundary on the blocktime duration used to determine whether difficulty should go up or not.
 )
-
-func ApplyBinanceSmartChainParams() {
-	GasLimitBoundDivisor = 256
-}

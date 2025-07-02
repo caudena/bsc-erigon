@@ -80,10 +80,13 @@ func (noopBridgeStore) LastFrozenEventBlockNum() uint64 {
 func (noopBridgeStore) EventTxnToBlockNum(ctx context.Context, borTxHash libcommon.Hash) (uint64, bool, error) {
 	return 0, false, errors.New("noop")
 }
+func (noopBridgeStore) EventsByTimeframe(ctx context.Context, timeFrom, timeTo uint64) ([][]byte, error) {
+	return nil, errors.New("noop")
+}
 func (noopBridgeStore) Events(ctx context.Context, start, end uint64) ([][]byte, error) {
 	return nil, errors.New("noop")
 }
-func (noopBridgeStore) BlockEventIdsRange(ctx context.Context, blockNum uint64) (start uint64, end uint64, ok bool, err error) {
+func (noopBridgeStore) BlockEventIdsRange(ctx context.Context, blockHash libcommon.Hash, blockNum uint64) (start uint64, end uint64, ok bool, err error) {
 	return 0, 0, false, errors.New("noop")
 }
 func (noopBridgeStore) PutEventTxnToBlockNum(ctx context.Context, eventTxnToBlockNum map[libcommon.Hash]uint64) error {
@@ -224,8 +227,12 @@ func (h *HeimdallSimulator) FetchStateSyncEvents(_ context.Context, fromId uint6
 	return events, err
 }
 
-func (h *HeimdallSimulator) FetchStateSyncEvent(ctx context.Context, id uint64) (*heimdall.EventRecordWithTime, error) {
-	return nil, errors.New("method FetchStateSyncEvent not implemented")
+func (h *HeimdallSimulator) FetchChainManagerStatus(ctx context.Context) (*heimdall.ChainManagerStatus, error) {
+	return nil, errors.New("method FetchChainManagerStatus not implemented")
+}
+
+func (h *HeimdallSimulator) FetchStatus(ctx context.Context) (*heimdall.Status, error) {
+	return nil, errors.New("method FetchStatus not implemented")
 }
 
 func (h *HeimdallSimulator) FetchCheckpoint(ctx context.Context, number int64) (*heimdall.Checkpoint, error) {

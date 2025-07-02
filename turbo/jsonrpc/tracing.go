@@ -104,7 +104,7 @@ func (api *PrivateDebugAPIImpl) traceBlock(ctx context.Context, blockNrOrHash rp
 	}
 	engine := api.engine()
 
-	txNumsReader := rawdbv3.TxNums.WithCustomReadTxNumFunc(freezeblocks.ReadTxNumFuncFromBlockReader(ctx, api._blockReader))
+	txNumsReader := rawdbv3.TxNums.WithCustomReadTxNumFunc(freezeblocks.TxBlockIndexFromBlockReader(ctx, api._blockReader))
 	ibs, blockCtx, _, rules, signer, err := transactions.ComputeBlockContext(ctx, engine, block.HeaderNoCopy(), chainConfig, api._blockReader, txNumsReader, tx, 0)
 	if err != nil {
 		stream.WriteNil()
@@ -162,13 +162,6 @@ func (api *PrivateDebugAPIImpl) traceBlock(ctx context.Context, blockNrOrHash rp
 		ibs.SetTxContext(txnIndex, block.NumberU64())
 		msg, _ := txn.AsMessage(*signer, block.BaseFee(), rules)
 
-		if msg.FeeCap().IsZero() && engine != nil {
-			syscall := func(contract common.Address, data []byte) ([]byte, error) {
-				return core.SysCallContract(contract, data, chainConfig, ibs, block.Header(), engine, true /* constCall */)
-			}
-			msg.SetIsFree(engine.IsServiceTransaction(msg.From(), syscall))
-		}
-
 		txCtx := evmtypes.TxContext{
 			TxHash:     txnHash,
 			Origin:     msg.From(),
@@ -201,7 +194,7 @@ func (api *PrivateDebugAPIImpl) traceBlock(ctx context.Context, blockNrOrHash rp
 			usedGas += _usedGas
 		} else {
 			var _usedGas uint64
-			_usedGas, err = transactions.TraceTx(ctx, msg, blockCtx, txCtx, block.Hash(), txnIndex, ibs, config, chainConfig, stream, api.evmCallTimeout)
+			_usedGas, err = transactions.TraceTx(ctx, engine, msg, blockCtx, txCtx, block.Hash(), txnIndex, ibs, config, chainConfig, stream, api.evmCallTimeout)
 			usedGas += _usedGas
 		}
 		if err == nil {
@@ -328,7 +321,7 @@ func (api *PrivateDebugAPIImpl) TraceTransaction(ctx context.Context, hash commo
 	}
 	engine := api.engine()
 
-	txNumsReader := rawdbv3.TxNums.WithCustomReadTxNumFunc(freezeblocks.ReadTxNumFuncFromBlockReader(ctx, api._blockReader))
+	txNumsReader := rawdbv3.TxNums.WithCustomReadTxNumFunc(freezeblocks.TxBlockIndexFromBlockReader(ctx, api._blockReader))
 	ibs, blockCtx, _, rules, signer, err := transactions.ComputeBlockContext(ctx, engine, block.HeaderNoCopy(), chainConfig, api._blockReader, txNumsReader, tx, txnIndex)
 	if err != nil {
 		stream.WriteNil()
@@ -365,7 +358,7 @@ func (api *PrivateDebugAPIImpl) TraceTransaction(ctx context.Context, hash commo
 	}
 
 	// Trace the transaction and return
-	_, err = transactions.TraceTx(ctx, msg, blockCtx, txCtx, block.Hash(), txnIndex, ibs, config, chainConfig, stream, api.evmCallTimeout)
+	_, err = transactions.TraceTx(ctx, engine, msg, blockCtx, txCtx, block.Hash(), txnIndex, ibs, config, chainConfig, stream, api.evmCallTimeout)
 	return err
 }
 
@@ -397,7 +390,7 @@ func (api *PrivateDebugAPIImpl) TraceCall(ctx context.Context, args ethapi.CallA
 	if config == nil || config.TxIndex == nil || isLatest {
 		stateReader, err = rpchelper.CreateStateReader(ctx, dbtx, api._blockReader, blockNrOrHash, 0, api.filters, api.stateCache, chainConfig.ChainName)
 	} else {
-		txNumsReader := rawdbv3.TxNums.WithCustomReadTxNumFunc(freezeblocks.ReadTxNumFuncFromBlockReader(ctx, api._blockReader))
+		txNumsReader := rawdbv3.TxNums.WithCustomReadTxNumFunc(freezeblocks.TxBlockIndexFromBlockReader(ctx, api._blockReader))
 		stateReader, err = rpchelper.CreateHistoryStateReader(dbtx, txNumsReader, blockNumber, int(*config.TxIndex), chainConfig.ChainName)
 	}
 	if err != nil {
@@ -434,7 +427,7 @@ func (api *PrivateDebugAPIImpl) TraceCall(ctx context.Context, args ethapi.CallA
 	blockCtx := transactions.NewEVMBlockContext(engine, header, blockNrOrHash.RequireCanonical, dbtx, api._blockReader, chainConfig)
 	txCtx := core.NewEVMTxContext(msg)
 	// Trace the transaction and return
-	_, err = transactions.TraceTx(ctx, msg, blockCtx, txCtx, hash, 0, ibs, config, chainConfig, stream, api.evmCallTimeout)
+	_, err = transactions.TraceTx(ctx, engine, msg, blockCtx, txCtx, hash, 0, ibs, config, chainConfig, stream, api.evmCallTimeout)
 	return err
 }
 
@@ -572,7 +565,7 @@ func (api *PrivateDebugAPIImpl) TraceCallMany(ctx context.Context, bundles []Bun
 			}
 			txCtx = core.NewEVMTxContext(msg)
 			ibs.SetTxContext(txnIndex, blockCtx.BlockNumber)
-			_, err = transactions.TraceTx(ctx, msg, blockCtx, txCtx, block.Hash(), txnIndex, evm.IntraBlockState(), config, chainConfig, stream, api.evmCallTimeout)
+			_, err = transactions.TraceTx(ctx, api.engine(), msg, blockCtx, txCtx, block.Hash(), txnIndex, evm.IntraBlockState(), config, chainConfig, stream, api.evmCallTimeout)
 			if err != nil {
 				stream.WriteArrayEnd()
 				stream.WriteArrayEnd()

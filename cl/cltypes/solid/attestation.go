@@ -63,7 +63,7 @@ func (a *Attestation) Copy() *Attestation {
 	new.AggregationBits = a.AggregationBits.Copy()
 	new.Data = &AttestationData{}
 	*new.Data = *a.Data
-	new.Signature = a.Signature
+	copy(new.Signature[:], a.Signature[:])
 	new.CommitteeBits = a.CommitteeBits.Copy()
 	return new
 }
@@ -173,8 +173,8 @@ func (a *Attestation) UnmarshalJSON(data []byte) error {
 //	data: AttestationData
 //	signature: BLSSignature
 type SingleAttestation struct {
-	CommitteeIndex uint64            `json:"committee_index"`
-	AttesterIndex  uint64            `json:"attester_index"`
+	CommitteeIndex uint64            `json:"committee_index,string"`
+	AttesterIndex  uint64            `json:"attester_index,string"`
 	Data           *AttestationData  `json:"data"`
 	Signature      libcommon.Bytes96 `json:"signature"`
 }
@@ -206,11 +206,14 @@ func (s *SingleAttestation) Static() bool {
 	return true
 }
 
-func (s *SingleAttestation) ToAttestation(memberIndexInCommittee int) *Attestation {
+func (s *SingleAttestation) ToAttestation(memberIndexInCommittee int, committeeLen int) *Attestation {
 	committeeBits := NewBitVector(maxCommitteesPerSlot)
 	committeeBits.SetBitAt(int(s.CommitteeIndex), true)
-	aggregationBits := NewBitList(0, aggregationBitsSizeElectra)
-	aggregationBits.SetOnBit(maxValidatorsPerCommittee*int(s.CommitteeIndex) + memberIndexInCommittee)
+	// flip the bit for the validator and also mark the last bit
+	bytes := make([]byte, committeeLen/8+1)
+	bytes[memberIndexInCommittee/8] |= 1 << (memberIndexInCommittee % 8)
+	bytes[committeeLen/8] |= 1 << (committeeLen % 8)
+	aggregationBits := BitlistFromBytes(bytes, aggregationBitsSizeElectra)
 	return &Attestation{
 		AggregationBits: aggregationBits,
 		Data:            s.Data,

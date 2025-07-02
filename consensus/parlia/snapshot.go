@@ -27,6 +27,8 @@ import (
 	"math"
 	"sort"
 
+	"github.com/erigontech/erigon/params"
+
 	"github.com/erigontech/erigon-lib/chain"
 	"github.com/erigontech/erigon-lib/common"
 	libcommon "github.com/erigontech/erigon-lib/common"
@@ -47,6 +49,8 @@ type Snapshot struct {
 
 	Number           uint64                               `json:"number"`                // Block number where the snapshot was created
 	Hash             libcommon.Hash                       `json:"hash"`                  // Block hash where the snapshot was created
+	EpochLength      uint64                               `json:"epoch_length"`          // Number of Blocks in one epoch
+	BlockInterval    uint64                               `json:"block_interval"`        // Block Interval in milliseconds
 	TurnLength       uint8                                `json:"turn_length"`           // Length of `turn`, meaning the consecutive number of blocks a validator receives priority for block production
 	Validators       map[libcommon.Address]*ValidatorInfo `json:"validators"`            // Set of authorized validators at this moment
 	Recents          map[uint64]libcommon.Address         `json:"recents"`               // Set of recent validators for spam protections
@@ -77,6 +81,8 @@ func newSnapshot(
 		sigCache:         sigCache,
 		Number:           number,
 		Hash:             hash,
+		EpochLength:      params.DefaultEpochLength,
+		BlockInterval:    params.DefaultBlockInterval,
 		TurnLength:       defaultTurnLength,
 		Recents:          make(map[uint64]common.Address),
 		RecentForkHashes: make(map[uint64]string),
@@ -141,6 +147,12 @@ func loadSnapshot(config *chain.ParliaConfig, sigCache *lru.ARCCache[common.Hash
 	if snap.TurnLength == 0 { // no TurnLength field in old snapshots
 		snap.TurnLength = defaultTurnLength
 	}
+	if snap.EpochLength == 0 { // no EpochLength field in old snapshots
+		snap.EpochLength = params.DefaultEpochLength
+	}
+	if snap.BlockInterval == 0 { // no BlockInterval field in old snapshots
+		snap.BlockInterval = params.DefaultBlockInterval
+	}
 
 	snap.config = config
 	snap.sigCache = sigCache
@@ -188,6 +200,8 @@ func (s *Snapshot) copy() *Snapshot {
 		sigCache:         s.sigCache,
 		Number:           s.Number,
 		Hash:             s.Hash,
+		EpochLength:      s.EpochLength,
+		BlockInterval:    s.BlockInterval,
 		TurnLength:       s.TurnLength,
 		Validators:       make(map[libcommon.Address]*ValidatorInfo),
 		Recents:          make(map[uint64]libcommon.Address),
@@ -228,13 +242,13 @@ func (s *Snapshot) isMajorityFork(forkHash string) bool {
 	return ally > len(s.RecentForkHashes)/2
 }
 
-func (s *Snapshot) updateAttestation(header *types.Header, chainConfig *chain.Config, parliaConfig *chain.ParliaConfig) {
+func (s *Snapshot) updateAttestation(header *types.Header, chainConfig *chain.Config) {
 	if !chainConfig.IsLuban(header.Number.Uint64()) {
 		return
 	}
 
 	// The attestation should have been checked in verify header, update directly
-	attestation, _ := getVoteAttestationFromHeader(header, chainConfig, parliaConfig)
+	attestation, _ := getVoteAttestationFromHeader(header, chainConfig, s.EpochLength)
 	if attestation == nil {
 		return
 	}
@@ -259,6 +273,13 @@ func (s *Snapshot) updateAttestation(header *types.Header, chainConfig *chain.Co
 	} else {
 		s.Attestation = attestation.Data
 	}
+}
+
+func (s *Snapshot) getFinalizedNumber() uint64 {
+	if s.Attestation != nil {
+		return s.Attestation.SourceNumber
+	}
+	return 0
 }
 
 func (s *Snapshot) apply(headers []*types.Header, chain consensus.ChainHeaderReader, parents []*types.Header, chainConfig *chain.Config, recentSnaps *lru.ARCCache[libcommon.Hash, *Snapshot], verified bool) (*Snapshot, error) {
@@ -323,12 +344,35 @@ func (s *Snapshot) apply(headers []*types.Header, chain consensus.ChainHeaderRea
 				}
 			}
 		}
+		snap.updateAttestation(header, chainConfig)
 		snap.Recents[number] = validator
+		if chainConfig.IsMaxwell(header.Number.Uint64(), header.Time) {
+			latestFinalizedBlockNumber := snap.getFinalizedNumber()
+			// BEP-524: Clear entries up to the latest finalized block
+			for blockNumber := range snap.Recents {
+				if blockNumber <= latestFinalizedBlockNumber {
+					delete(snap.Recents, blockNumber)
+				}
+			}
+		}
 		snap.RecentForkHashes[number] = hex.EncodeToString(header.Extra[extraVanity-nextForkHashSize : extraVanity])
-		snap.updateAttestation(header, chainConfig, s.config)
+		if chainConfig.IsMaxwell(header.Number.Uint64(), header.Time) {
+			snap.BlockInterval = params.MaxwellBlockInterval
+		} else if chainConfig.IsLorentz(header.Number.Uint64(), header.Time) {
+			snap.BlockInterval = params.LorentzBlockInterval
+		}
+		epochLength := snap.EpochLength
+		nextBlockNumber := header.Number.Uint64() + 1
+		if snap.EpochLength == params.DefaultEpochLength && chainConfig.IsLorentz(header.Number.Uint64(), header.Time) && nextBlockNumber%params.LorentzEpochLength == 0 {
+			// Without this condition, an incorrect block might be used to parse validators for certain blocks after the Lorentz hard fork.
+			snap.EpochLength = params.LorentzEpochLength
+		}
+		if snap.EpochLength == params.LorentzEpochLength && chainConfig.IsMaxwell(header.Number.Uint64(), header.Time) && nextBlockNumber%params.MaxwellEpochLength == 0 {
+			snap.EpochLength = params.MaxwellEpochLength
+		}
 		// change validator set
-		if number > 0 && number%s.config.Epoch == snap.minerHistoryCheckLen() {
-			epochKey := math.MaxUint64 - number/s.config.Epoch // impossible used as a block number
+		if number > 0 && number%epochLength == snap.minerHistoryCheckLen() {
+			epochKey := math.MaxUint64 - number/epochLength // impossible used as a block number
 			if chainConfig.IsBohr(number, header.Time) {
 				// after switching the validator set, snap.Validators may become larger,
 				// then the unexpected second switch will happen, just skip it.
@@ -343,7 +387,7 @@ func (s *Snapshot) apply(headers []*types.Header, chain consensus.ChainHeaderRea
 
 			oldVersionsLen := snap.versionHistoryCheckLen()
 			// get turnLength from headers and use that for new turnLength
-			turnLength, err := parseTurnLength(checkpointHeader, chainConfig, s.config)
+			turnLength, err := parseTurnLength(checkpointHeader, chainConfig, epochLength)
 			if err != nil {
 				return nil, err
 			}
@@ -353,7 +397,7 @@ func (s *Snapshot) apply(headers []*types.Header, chain consensus.ChainHeaderRea
 			}
 
 			// get validators from headers and use that for new validator set
-			newValArr, voteAddrs, err := parseValidators(checkpointHeader, chainConfig, s.config)
+			newValArr, voteAddrs, err := parseValidators(checkpointHeader, chainConfig, epochLength)
 			if err != nil {
 				return nil, err
 			}
@@ -395,7 +439,7 @@ func (s *Snapshot) apply(headers []*types.Header, chain consensus.ChainHeaderRea
 				delete(snap.RecentForkHashes, number-i)
 			}
 		}
-		if snap.Number+s.config.Epoch >= headers[len(headers)-1].Number.Uint64() {
+		if snap.Number+epochLength >= headers[len(headers)-1].Number.Uint64() {
 			temp := snap.copy()
 			temp.Number = number
 			temp.Hash = header.Hash()
@@ -508,8 +552,8 @@ func (s *Snapshot) SignRecently(validator common.Address) bool {
 	return s.signRecentlyByCounts(validator, s.countRecents())
 }
 
-func parseValidators(header *types.Header, chainConfig *chain.Config, parliaConfig *chain.ParliaConfig) ([]libcommon.Address, []types.BLSPublicKey, error) {
-	validatorsBytes := getValidatorBytesFromHeader(header, chainConfig, parliaConfig)
+func parseValidators(header *types.Header, chainConfig *chain.Config, epochLength uint64) ([]libcommon.Address, []types.BLSPublicKey, error) {
+	validatorsBytes := getValidatorBytesFromHeader(header, chainConfig, epochLength)
 	if len(validatorsBytes) == 0 {
 		return nil, nil, errors.New("invalid validators bytes")
 	}
@@ -533,8 +577,8 @@ func parseValidators(header *types.Header, chainConfig *chain.Config, parliaConf
 	return cnsAddrs, voteAddrs, nil
 }
 
-func parseTurnLength(header *types.Header, chainConfig *chain.Config, parliaConfig *chain.ParliaConfig) (*uint8, error) {
-	if header.Number.Uint64()%parliaConfig.Epoch != 0 ||
+func parseTurnLength(header *types.Header, chainConfig *chain.Config, epochLength uint64) (*uint8, error) {
+	if header.Number.Uint64()%epochLength != 0 ||
 		!chainConfig.IsBohr(header.Number.Uint64(), header.Time) {
 		return nil, nil
 	}

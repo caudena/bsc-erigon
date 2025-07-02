@@ -151,10 +151,10 @@ func (s *Merge) CalculateRewards(config *chain.Config, header *types.Header, unc
 
 func (s *Merge) Finalize(config *chain.Config, header *types.Header, state *state.IntraBlockState,
 	txs types.Transactions, uncles []*types.Header, receipts types.Receipts, withdrawals []*types.Withdrawal,
-	chain consensus.ChainReader, syscall consensus.SystemCall, systemTxCall consensus.SystemTxCall, txIndex int, logger log.Logger,
+	chain consensus.ChainReader, syscall consensus.SystemCall, skipReceiptsEval bool, systemTxCall consensus.SystemTxCall, txIndex int, logger log.Logger,
 ) (types.Transactions, types.Receipts, types.FlatRequests, error) {
 	if !misc.IsPoSHeader(header) {
-		return s.eth1Engine.Finalize(config, header, state, txs, uncles, receipts, withdrawals, chain, syscall, systemTxCall, 0, logger)
+		return s.eth1Engine.Finalize(config, header, state, txs, uncles, receipts, withdrawals, chain, syscall, skipReceiptsEval, systemTxCall, 0, logger)
 	}
 
 	rewards, err := s.CalculateRewards(config, header, uncles, syscall)
@@ -186,10 +186,13 @@ func (s *Merge) Finalize(config *chain.Config, header *types.Header, state *stat
 	}
 
 	var rs types.FlatRequests
-	if config.IsPrague(header.Time) {
+	if config.IsPrague(header.Time) && !skipReceiptsEval {
 		rs = make(types.FlatRequests, 0)
 		allLogs := make(types.Logs, 0)
 		for _, rec := range receipts {
+			if rec == nil {
+				return nil, nil, nil, fmt.Errorf("receipt is nil. Possible reason: you trying to execute txs in-parallel. But `consensus.Finalize` requires 'all receipts of block', means `Final` system txn must be executed in reducer (after all other txs of given block)")
+			}
 			allLogs = append(allLogs, rec.Logs...)
 		}
 		depositReqs, err := misc.ParseDepositLogs(allLogs, config.DepositContract)
@@ -199,11 +202,17 @@ func (s *Merge) Finalize(config *chain.Config, header *types.Header, state *stat
 		if depositReqs != nil {
 			rs = append(rs, *depositReqs)
 		}
-		withdrawalReq := misc.DequeueWithdrawalRequests7002(syscall)
+		withdrawalReq, err := misc.DequeueWithdrawalRequests7002(syscall, state)
+		if err != nil {
+			return nil, nil, nil, err
+		}
 		if withdrawalReq != nil {
 			rs = append(rs, *withdrawalReq)
 		}
-		consolidations := misc.DequeueConsolidationRequests7251(syscall)
+		consolidations, err := misc.DequeueConsolidationRequests7251(syscall, state)
+		if err != nil {
+			return nil, nil, nil, err
+		}
 		if consolidations != nil {
 			rs = append(rs, *consolidations)
 		}
@@ -225,7 +234,7 @@ func (s *Merge) FinalizeAndAssemble(config *chain.Config, header *types.Header, 
 		return s.eth1Engine.FinalizeAndAssemble(config, header, state, txs, uncles, receipts, withdrawals, chain, syscall, call, logger)
 	}
 	header.RequestsHash = nil
-	outTxs, outReceipts, outRequests, err := s.Finalize(config, header, state, txs, uncles, receipts, withdrawals, chain, syscall, nil, 0, logger)
+	outTxs, outReceipts, outRequests, err := s.Finalize(config, header, state, txs, uncles, receipts, withdrawals, chain, syscall, false, nil, 0, logger)
 
 	if err != nil {
 		return nil, nil, nil, nil, err

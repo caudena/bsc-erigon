@@ -27,6 +27,7 @@ import (
 	libcommon "github.com/erigontech/erigon-lib/common"
 	"github.com/erigontech/erigon-lib/common/hexutility"
 	execution "github.com/erigontech/erigon-lib/gointerfaces/executionproto"
+	"github.com/erigontech/erigon-lib/gointerfaces/typesproto"
 	"github.com/erigontech/erigon/cl/clparams"
 	"github.com/erigontech/erigon/cl/cltypes"
 	"github.com/erigontech/erigon/cl/monitor"
@@ -34,6 +35,8 @@ import (
 	"github.com/erigontech/erigon/turbo/engineapi/engine_types"
 	"github.com/erigontech/erigon/turbo/execution/eth1/eth1_chain_reader"
 )
+
+const reorgTooDeepDepth = 3
 
 type ExecutionClientDirect struct {
 	chainRW eth1_chain_reader.ChainReaderWriterEth1
@@ -86,6 +89,12 @@ func (cc *ExecutionClientDirect) NewPayload(
 		return PayloadStatusNotValidated, nil
 	}
 
+	// check if the block is too deep in the reorg accounting for underflow
+	if headHeader.Number.Uint64() > reorgTooDeepDepth && header.Number.Uint64() < headHeader.Number.Uint64()-reorgTooDeepDepth {
+		// reorg too deep
+		return PayloadStatusNotValidated, nil
+	}
+
 	startValidateChain := time.Now()
 	status, _, _, err := cc.chainRW.ValidateChain(ctx, payload.BlockHash, payload.BlockNumber)
 	if err != nil {
@@ -104,8 +113,8 @@ func (cc *ExecutionClientDirect) NewPayload(
 	return PayloadStatusNone, errors.New("unexpected status")
 }
 
-func (cc *ExecutionClientDirect) ForkChoiceUpdate(ctx context.Context, finalized libcommon.Hash, head libcommon.Hash, attr *engine_types.PayloadAttributes) ([]byte, error) {
-	status, _, _, err := cc.chainRW.UpdateForkChoice(ctx, head, head, finalized)
+func (cc *ExecutionClientDirect) ForkChoiceUpdate(ctx context.Context, finalized, safe, head libcommon.Hash, attr *engine_types.PayloadAttributes) ([]byte, error) {
+	status, _, _, err := cc.chainRW.UpdateForkChoice(ctx, head, safe, finalized)
 	if err != nil {
 		return nil, fmt.Errorf("execution Client RPC failed to retrieve ForkChoiceUpdate response, err: %w", err)
 	}
@@ -173,7 +182,7 @@ func (cc *ExecutionClientDirect) HasBlock(ctx context.Context, hash libcommon.Ha
 	return cc.chainRW.HasBlock(ctx, hash)
 }
 
-func (cc *ExecutionClientDirect) GetAssembledBlock(_ context.Context, idBytes []byte) (*cltypes.Eth1Block, *engine_types.BlobsBundleV1, *big.Int, error) {
+func (cc *ExecutionClientDirect) GetAssembledBlock(_ context.Context, idBytes []byte) (*cltypes.Eth1Block, *engine_types.BlobsBundleV1, *typesproto.RequestsBundle, *big.Int, error) {
 	return cc.chainRW.GetAssembledBlock(binary.LittleEndian.Uint64(idBytes))
 }
 

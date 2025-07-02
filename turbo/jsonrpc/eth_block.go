@@ -35,7 +35,6 @@ import (
 	"github.com/erigontech/erigon/core/state"
 	"github.com/erigontech/erigon/core/types"
 	"github.com/erigontech/erigon/core/vm"
-	"github.com/erigontech/erigon/polygon/bor/borcfg"
 	bortypes "github.com/erigontech/erigon/polygon/bor/types"
 	"github.com/erigontech/erigon/rpc"
 	"github.com/erigontech/erigon/turbo/adapter/ethapi"
@@ -92,7 +91,7 @@ func (api *APIImpl) CallBundle(ctx context.Context, txHashes []common.Hash, stat
 	}
 	defer func(start time.Time) { log.Trace("Executing EVM call finished", "runtime", time.Since(start)) }(time.Now())
 
-	txNumsReader := rawdbv3.TxNums.WithCustomReadTxNumFunc(freezeblocks.ReadTxNumFuncFromBlockReader(ctx, api._blockReader))
+	txNumsReader := rawdbv3.TxNums.WithCustomReadTxNumFunc(freezeblocks.TxBlockIndexFromBlockReader(ctx, api._blockReader))
 	stateBlockNumber, hash, latest, err := rpchelper.GetBlockNumber(ctx, stateBlockNumberOrHash, tx, api._blockReader, api.filters)
 	if err != nil {
 		return nil, err
@@ -182,7 +181,7 @@ func (api *APIImpl) CallBundle(ctx context.Context, txHashes []common.Hash, stat
 			return nil, err
 		}
 		// Execute the transaction message
-		result, err := core.ApplyMessage(evm, msg, gp, true /* refunds */, false /* gasBailout */)
+		result, err := core.ApplyMessage(evm, msg, gp, true /* refunds */, false /* gasBailout */, engine)
 		if err != nil {
 			return nil, err
 		}
@@ -261,9 +260,13 @@ func (api *APIImpl) GetBlockByNumber(ctx context.Context, number rpc.BlockNumber
 		}
 	}
 
-	if chainConfig.Bor != nil {
-		borConfig := chainConfig.Bor.(*borcfg.BorConfig)
-		response["miner"], _ = ecrecover(b.Header(), borConfig)
+	if chainConfig.Parlia != nil {
+		td, err := rawdb.ReadTd(tx, b.Hash(), b.NumberU64())
+		if err != nil {
+			return nil, err
+		}
+		response["totalDifficulty"] = (*hexutil.Big)(td)
+		response["milliTimestamp"] = hexutil.Uint64(b.Header().MilliTimestamp())
 	}
 
 	return response, err
@@ -332,9 +335,13 @@ func (api *APIImpl) GetBlockByHash(ctx context.Context, numberOrHash rpc.BlockNu
 		}
 	}
 
-	if chainConfig.Bor != nil {
-		borConfig := chainConfig.Bor.(*borcfg.BorConfig)
-		response["miner"], _ = ecrecover(block.Header(), borConfig)
+	if chainConfig.Parlia != nil {
+		td, err := rawdb.ReadTd(tx, block.Hash(), block.NumberU64())
+		if err != nil {
+			return nil, err
+		}
+		response["totalDifficulty"] = (*hexutil.Big)(td)
+		response["milliTimestamp"] = hexutil.Uint64(block.Header().MilliTimestamp())
 	}
 
 	return response, err

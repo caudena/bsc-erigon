@@ -50,7 +50,7 @@ import (
 
 type SortedRange interface {
 	GetRange() (from, to uint64)
-	GetType() snaptype.Type
+	GetGrouping() string
 }
 
 // NoOverlaps - keep largest ranges and avoid overlap
@@ -119,7 +119,7 @@ func findOverlaps[T SortedRange](in []T) (res []T, overlapped []T) {
 			f2 := in[j]
 			jFrom, jTo := f2.GetRange()
 
-			if f.GetType().Enum() != f2.GetType().Enum() {
+			if f.GetGrouping() != f2.GetGrouping() {
 				break
 			}
 			if jFrom == jTo {
@@ -496,7 +496,7 @@ func (s *RoTx) Close() {
 type BlockSnapshots interface {
 	LogStat(label string)
 	OpenFolder() error
-	OpenSegments(types []snaptype.Type, allowGaps bool) error
+	OpenSegments(types []snaptype.Type, allowGaps, allignMin bool) error
 	SegmentsMax() uint64
 	SegmentsMin() uint64
 	Delete(fileName string) error
@@ -505,6 +505,7 @@ type BlockSnapshots interface {
 	SetSegmentsMin(uint64)
 
 	DownloadComplete()
+	RemoveOverlaps() error
 	DownloadReady() bool
 	Ready(context.Context) <-chan error
 }
@@ -567,7 +568,7 @@ func newRoSnapshots(cfg ethconfig.BlocksFreezing, snapDir string, types []snapty
 	}
 
 	s.segmentsMin.Store(segmentsMin)
-	s.recalcVisibleFiles()
+	s.recalcVisibleFiles(s.alignMin)
 
 	if cfg.NoDownloader {
 		s.DownloadComplete()
@@ -601,12 +602,11 @@ func (s *RoSnapshots) VisibleBlocksAvailable(t snaptype.Enum) uint64 {
 }
 
 func (s *RoSnapshots) DownloadComplete() {
-	if !s.SegmentsReady() {
-		return
-	}
 	wasReady := s.downloadReady.Swap(true)
 	if !wasReady {
-		s.ready.set()
+		if s.SegmentsReady() {
+			s.ready.set()
+		}
 	}
 }
 
@@ -754,7 +754,18 @@ func (s *RoSnapshots) EnableMadvWillNeed() *RoSnapshots {
 
 	for _, t := range s.enums {
 		for _, sn := range v.segments[t].Segments {
-			sn.src.EnableMadvWillNeed()
+			sn.src.MadvWillNeed()
+		}
+	}
+	return s
+}
+func (s *RoSnapshots) MadvNormal() *RoSnapshots {
+	v := s.View()
+	defer v.Close()
+
+	for _, t := range s.enums {
+		for _, sn := range v.segments[t].Segments {
+			sn.src.MadvNormal()
 		}
 	}
 	return s
@@ -800,7 +811,7 @@ func RecalcVisibleSegments(dirtySegments *btree.BTreeG[*DirtySegment]) []*Visibl
 	return newVisibleSegments
 }
 
-func (s *RoSnapshots) recalcVisibleFiles() {
+func (s *RoSnapshots) recalcVisibleFiles(alignMin bool) {
 	defer func() {
 		s.idxMax.Store(s.idxAvailability())
 	}()
@@ -821,12 +832,12 @@ func (s *RoSnapshots) recalcVisibleFiles() {
 		if len(newVisibleSegments) > 0 {
 			to = newVisibleSegments[len(newVisibleSegments)-1].to - 1
 		}
-		if s.alignMin {
+		if alignMin {
 			maxVisibleBlocks = append(maxVisibleBlocks, to)
 		}
 	}
 
-	if s.alignMin {
+	if alignMin {
 		// all types must have same hight
 		minMaxVisibleBlock := slices.Min(maxVisibleBlocks)
 		for _, t := range s.enums {
@@ -963,7 +974,7 @@ func (s *RoSnapshots) OpenFiles() (list []string) {
 
 // OpenList stops on optimistic=false, continue opening files on optimistic=true
 func (s *RoSnapshots) OpenList(fileNames []string, optimistic bool) error {
-	defer s.recalcVisibleFiles()
+	defer s.recalcVisibleFiles(s.alignMin)
 
 	s.dirtyLock.Lock()
 	defer s.dirtyLock.Unlock()
@@ -986,8 +997,13 @@ func (s *RoSnapshots) InitSegments(fileNames []string) error {
 		return err
 	}
 
-	s.recalcVisibleFiles()
-	s.segmentsReady.Store(true)
+	s.recalcVisibleFiles(s.alignMin)
+	wasReady := s.segmentsReady.Swap(true)
+	if !wasReady {
+		if s.downloadReady.Load() {
+			s.ready.set()
+		}
+	}
 
 	return nil
 }
@@ -1151,13 +1167,18 @@ func (s *RoSnapshots) OpenFolder() error {
 		return err
 	}
 
-	s.recalcVisibleFiles()
-	s.segmentsReady.Store(true)
+	s.recalcVisibleFiles(s.alignMin)
+	wasReady := s.segmentsReady.Swap(true)
+	if !wasReady {
+		if s.downloadReady.Load() {
+			s.ready.set()
+		}
+	}
 	return nil
 }
 
-func (s *RoSnapshots) OpenSegments(types []snaptype.Type, allowGaps bool) error {
-	defer s.recalcVisibleFiles()
+func (s *RoSnapshots) OpenSegments(types []snaptype.Type, allowGaps, alignMin bool) error {
+	defer s.recalcVisibleFiles(alignMin)
 
 	s.dirtyLock.Lock()
 	defer s.dirtyLock.Unlock()
@@ -1183,7 +1204,7 @@ func (s *RoSnapshots) Close() {
 	if s == nil {
 		return
 	}
-	defer s.recalcVisibleFiles()
+	defer s.recalcVisibleFiles(s.alignMin)
 	s.dirtyLock.Lock()
 	defer s.dirtyLock.Unlock()
 
@@ -1224,7 +1245,21 @@ func (s *RoSnapshots) closeWhatNotInList(l []string) {
 
 func (s *RoSnapshots) RemoveOverlaps() error {
 	list, err := snaptype.Segments(s.dir)
+	if err != nil {
+		return err
+	}
+	if _, toRemove := findOverlaps(list); len(toRemove) > 0 {
+		filesToRemove := make([]string, 0, len(toRemove))
 
+		for _, info := range toRemove {
+			filesToRemove = append(filesToRemove, info.Path)
+		}
+
+		removeOldFiles(filesToRemove, s.dir)
+	}
+
+	//it's possible that .seg was remove but .idx not (kill between deletes, etc...)
+	list, err = snaptype.IdxFiles(s.dir)
 	if err != nil {
 		return err
 	}
@@ -1238,7 +1273,6 @@ func (s *RoSnapshots) RemoveOverlaps() error {
 
 		removeOldFiles(filesToRemove, s.dir)
 	}
-
 	return nil
 }
 
@@ -1325,7 +1359,7 @@ func (s *RoSnapshots) Delete(fileName string) error {
 	v := s.View()
 	defer v.Close()
 
-	defer s.recalcVisibleFiles()
+	defer s.recalcVisibleFiles(s.alignMin)
 	if err := s.delete(fileName); err != nil {
 		return fmt.Errorf("can't delete file: %w", err)
 	}
@@ -1636,9 +1670,11 @@ func removeOldFiles(toDel []string, snapDir string) {
 		ext := filepath.Ext(f)
 		withoutExt := f[:len(f)-len(ext)]
 		_ = os.Remove(withoutExt + ".idx")
+		_ = os.Remove(withoutExt + ".idx.torrent")
 		isTxnType := strings.HasSuffix(withoutExt, coresnaptype.Transactions.Name())
 		if isTxnType {
 			_ = os.Remove(withoutExt + "-to-block.idx")
+			_ = os.Remove(withoutExt + "-to-block.idx.torrent")
 		}
 	}
 	tmpFiles, err := snaptype.TmpFiles(snapDir)

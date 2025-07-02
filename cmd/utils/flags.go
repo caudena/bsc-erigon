@@ -48,11 +48,13 @@ import (
 	"github.com/erigontech/erigon-lib/direct"
 	downloadercfg2 "github.com/erigontech/erigon-lib/downloader/downloadercfg"
 	"github.com/erigontech/erigon-lib/log/v3"
+	"github.com/erigontech/erigon-lib/state"
 	"github.com/erigontech/erigon/cl/clparams"
 	"github.com/erigontech/erigon/cmd/downloader/downloadernat"
 	"github.com/erigontech/erigon/cmd/utils/flags"
 	"github.com/erigontech/erigon/consensus/ethash/ethashcfg"
 	"github.com/erigontech/erigon/core"
+	"github.com/erigontech/erigon/core/types"
 	"github.com/erigontech/erigon/eth/ethconfig"
 	"github.com/erigontech/erigon/eth/gasprice/gaspricecfg"
 	"github.com/erigontech/erigon/node/nodecfg"
@@ -95,6 +97,15 @@ var (
 		Name:  "networkid",
 		Usage: "Explicitly set network id (integer)(For testnets: use --chain <testnet_name> instead)",
 		Value: ethconfig.Defaults.NetworkID,
+	}
+	PersistReceiptsFlag = cli.Uint64Flag{
+		Name:  "experiment.persist.receipts",
+		Usage: "Set > 0 to store receipts in chaindata db (only on chain-tip) - RPC for recent receit/logs will be faster. Values: 1_000 good starting point. 10_000 receitps it's ~1Gb (not much IO increase). Please test before go over 100_000",
+	}
+	PersistReceiptsV2Flag = cli.BoolFlag{
+		Name:  "experiment.persist.receipts.v2",
+		Usage: "To store receipts in chaindata db (only on chain-tip) - RPC for recent receit/logs will be faster. Values: 1_000 good starting point. 10_000 receitps it's ~1Gb (not much IO increase). Please test before go over 100_000",
+		Value: ethconfig.Defaults.PersistReceiptsCacheV2,
 	}
 	DeveloperPeriodFlag = cli.IntFlag{
 		Name:  "dev.period",
@@ -147,7 +158,7 @@ var (
 	// Transaction pool settings
 	TxPoolDisableFlag = cli.BoolFlag{
 		Name:  "txpool.disable",
-		Usage: "Experimental external pool and block producer, see ./cmd/txpool/readme.md for more info. Disabling internal txpool and block producer.",
+		Usage: "External pool and block producer, see ./cmd/txpool/readme.md for more info. Disabling internal txpool and block producer.",
 		Value: false,
 	}
 	TxPoolGossipDisableFlag = cli.BoolFlag{
@@ -226,7 +237,6 @@ var (
 	MinerGasLimitFlag = cli.Uint64Flag{
 		Name:  "miner.gaslimit",
 		Usage: "Target gas limit for mined blocks",
-		Value: ethconfig.Defaults.Miner.GasLimit,
 	}
 	MinerGasPriceFlag = flags.BigFlag{
 		Name:  "miner.gasprice",
@@ -491,15 +501,6 @@ var (
 		Name:  "rpc.allow-unprotected-txs",
 		Usage: "Allow for unprotected (non-EIP155 signed) transactions to be submitted via RPC",
 	}
-	// Careful! Because we must rewind the hash state
-	// and re-compute the state trie, the further back in time the request, the more
-	// computationally intensive the operation becomes.
-	// The current default has been chosen arbitrarily as 'useful' without likely being overly computationally intense.
-	RpcMaxGetProofRewindBlockCount = cli.IntFlag{
-		Name:  "rpc.maxgetproofrewindblockcount.limit",
-		Usage: "Max GetProof rewind block count",
-		Value: 100_000,
-	}
 	StateCacheFlag = cli.StringFlag{
 		Name:  "state.cache",
 		Value: "0MB",
@@ -698,7 +699,7 @@ var (
 	}
 	TorrentDownloadSlotsFlag = cli.IntFlag{
 		Name:  "torrent.download.slots",
-		Value: 128,
+		Value: 32,
 		Usage: "Amount of files to download in parallel.",
 	}
 	TorrentStaticPeersFlag = cli.StringFlag{
@@ -748,7 +749,7 @@ var (
 	DbSizeLimitFlag = cli.StringFlag{
 		Name:  "db.size.limit",
 		Usage: "Runtime limit of chaindata db size (can change at any time)",
-		Value: (200 * datasize.GB).String(),
+		Value: (1 * datasize.TB).String(),
 	}
 	DbWriteMapFlag = cli.BoolFlag{
 		Name:  "db.writemap",
@@ -815,6 +816,11 @@ var (
 		Usage: "Enabling syncing with a stage that uses the polygon sync component",
 	}
 
+	PolygonLogIndex = cli.BoolFlag{
+		Name:  "polygon.logindex",
+		Usage: "Workaround for incorrect logIndex in RPC",
+	}
+
 	ConfigFlag = cli.StringFlag{
 		Name:  "config",
 		Usage: "Sets erigon flags from YAML/TOML file",
@@ -844,12 +850,12 @@ var (
 	CaplinMaxInboundTrafficPerPeerFlag = cli.StringFlag{
 		Name:  "caplin.max-inbound-traffic-per-peer",
 		Usage: "Max inbound traffic per second per peer",
-		Value: "256KB",
+		Value: "1MB",
 	}
 	CaplinMaxOutboundTrafficPerPeerFlag = cli.StringFlag{
 		Name:  "caplin.max-outbound-traffic-per-peer",
 		Usage: "Max outbound traffic per second per peer",
-		Value: "256KB",
+		Value: "1MB",
 	}
 	CaplinAdaptableTrafficRequirementsFlag = cli.BoolFlag{
 		Name:  "caplin.adaptable-maximum-traffic-requirements",
@@ -879,9 +885,13 @@ var (
 	CaplinMaxPeerCount = cli.Uint64Flag{
 		Name:  "caplin.max-peer-count",
 		Usage: "Max number of peers to connect",
-		Value: 80,
+		Value: 128,
 	}
-
+	CaplinUseEngineApiFlag = cli.BoolFlag{
+		Name:  "caplin.use-engine-api",
+		Usage: "Use engine API for internal Caplin. useful for testing and if CL network is degraded",
+		Value: false,
+	}
 	SentinelAddrFlag = cli.StringFlag{
 		Name:  "sentinel.addr",
 		Usage: "Address for sentinel",
@@ -1080,7 +1090,7 @@ var (
 	DiagDisabledFlag = cli.BoolFlag{
 		Name:  "diagnostics.disabled",
 		Usage: "Disable diagnostics",
-		Value: false,
+		Value: true,
 	}
 	DiagEndpointAddrFlag = cli.StringFlag{
 		Name:  "diagnostics.endpoint.addr",
@@ -1121,6 +1131,10 @@ var (
 	PolygonPosSingleSlotFinalityBlockAtFlag = cli.Int64Flag{
 		Name:  "polygon.pos.ssf.block",
 		Usage: "Enabling Polygon PoS Single Slot Finality since block",
+	}
+	KeepExecutionProofsFlag = cli.BoolFlag{
+		Name:  "experimental.commitment-history",
+		Usage: "Enables blazing fast eth_getProof for executed block",
 	}
 )
 
@@ -1493,10 +1507,6 @@ func setDataDir(ctx *cli.Context, cfg *nodecfg.Config) error {
 	} else {
 		cfg.Dirs = datadir.New(paths.DataDirForNetwork(paths.DefaultDataDir(), ctx.String(ChainFlag.Name)))
 	}
-	_, err := downloadercfg2.LoadSnapshotsHashes(ctx.Context, cfg.Dirs, ctx.String(ChainFlag.Name))
-	if err != nil {
-		return err
-	}
 
 	cfg.MdbxPageSize = flags.DBPageSizeFlagUnmarshal(ctx, DbPageSizeFlag.Name, DbPageSizeFlag.Usage)
 	if err := cfg.MdbxDBSizeLimit.UnmarshalText([]byte(ctx.String(DbSizeLimitFlag.Name))); err != nil {
@@ -1665,9 +1675,12 @@ func SetupMinerCobra(cmd *cobra.Command, cfg *params.MiningConfig) {
 		panic(err)
 	}
 	cfg.ExtraData = []byte(extraDataStr)
-	cfg.GasLimit, err = flags.GetUint64(MinerGasLimitFlag.Name)
-	if err != nil {
-		panic(err)
+	if flags.Changed(MinerGasLimitFlag.Name) {
+		gasLimit, err := flags.GetUint64(MinerGasLimitFlag.Name)
+		if err != nil {
+			panic(err)
+		}
+		cfg.GasLimit = &gasLimit
 	}
 	price, err := flags.GetInt64(MinerGasPriceFlag.Name)
 	if err != nil {
@@ -1719,6 +1732,7 @@ func setBorConfig(ctx *cli.Context, cfg *ethconfig.Config, nodeConfig *nodecfg.C
 	cfg.WithHeimdallWaypointRecording = ctx.Bool(WithHeimdallWaypoints.Name)
 	cfg.PolygonSync = ctx.Bool(PolygonSyncFlag.Name)
 	cfg.PolygonSyncStage = ctx.Bool(PolygonSyncStageFlag.Name)
+	cfg.PolygonExtraReceipt = ctx.Bool(PolygonLogIndex.Name)
 
 	if cfg.PolygonSync {
 		cfg.WithHeimdallMilestones = false
@@ -1741,7 +1755,7 @@ func setBorConfig(ctx *cli.Context, cfg *ethconfig.Config, nodeConfig *nodecfg.C
 }
 
 func setMiner(ctx *cli.Context, cfg *params.MiningConfig) {
-	cfg.Enabled = ctx.IsSet(MiningEnabledFlag.Name)
+	cfg.Enabled = ctx.Bool(MiningEnabledFlag.Name)
 	cfg.EnabledPOS = !ctx.IsSet(ProposingDisableFlag.Name)
 
 	if cfg.Enabled && len(cfg.Etherbase.Bytes()) == 0 {
@@ -1752,9 +1766,20 @@ func setMiner(ctx *cli.Context, cfg *params.MiningConfig) {
 	}
 	if ctx.IsSet(MinerExtraDataFlag.Name) {
 		cfg.ExtraData = []byte(ctx.String(MinerExtraDataFlag.Name))
+	} else if len(params.GitCommit) > 0 {
+		cfg.ExtraData = []byte(ctx.App.Name + "-" + params.VersionWithCommit(params.GitCommit))
+	} else {
+		cfg.ExtraData = []byte(ctx.App.Name + "-" + ctx.App.Version)
 	}
+	maxExtra := min(int(params.MaximumExtraDataSize), types.ExtraVanityLength)
+	if len(cfg.ExtraData) > maxExtra {
+		cfg.ExtraData = cfg.ExtraData[:maxExtra]
+	}
+
 	if ctx.IsSet(MinerGasLimitFlag.Name) {
-		cfg.GasLimit = ctx.Uint64(MinerGasLimitFlag.Name)
+		if gasLimit := ctx.Uint64(MinerGasLimitFlag.Name); gasLimit != 0 {
+			cfg.GasLimit = &gasLimit
+		}
 	}
 	if ctx.IsSet(MinerGasPriceFlag.Name) {
 		cfg.GasPrice = flags.GlobalBig(ctx, MinerGasPriceFlag.Name)
@@ -1791,6 +1816,13 @@ func setWhitelist(ctx *cli.Context, cfg *ethconfig.Config) {
 }
 
 func setBeaconAPI(ctx *cli.Context, cfg *ethconfig.Config) error {
+	cfg.CaplinConfig.EnableEngineAPI = ctx.Bool(CaplinUseEngineApiFlag.Name)
+
+	if cfg.CaplinConfig.EnableEngineAPI && ctx.IsSet(BeaconAPIFlag.Name) {
+		log.Warn("Beacon API flag is set, but engine API is enabled. Beacon API is automatically disabled.")
+		return nil
+	}
+
 	allowed := ctx.StringSlice(BeaconAPIFlag.Name)
 	if err := cfg.CaplinConfig.BeaconAPIRouter.UnwrapEndpointsList(allowed); err != nil {
 		return err
@@ -1808,15 +1840,33 @@ func setBeaconAPI(ctx *cli.Context, cfg *ethconfig.Config) error {
 }
 
 func setCaplin(ctx *cli.Context, cfg *ethconfig.Config) {
+	cfg.CaplinConfig.EnableEngineAPI = ctx.Bool(CaplinUseEngineApiFlag.Name)
+
 	// Caplin's block's backfilling is enabled if any of the following flags are set
-	cfg.CaplinConfig.ArchiveBlocks = ctx.Bool(CaplinArchiveBlocksFlag.Name) || ctx.Bool(CaplinArchiveStatesFlag.Name) || ctx.Bool(CaplinArchiveBlobsFlag.Name)
-	cfg.CaplinConfig.SnapshotGenerationEnabled = ctx.Bool(CaplinEnableSnapshotGeneration.Name)
-	// More granularity here.
-	cfg.CaplinConfig.ArchiveBlobs = ctx.Bool(CaplinArchiveBlobsFlag.Name)
+	if !cfg.CaplinConfig.EnableEngineAPI {
+		cfg.CaplinConfig.ArchiveBlocks = ctx.Bool(CaplinArchiveBlocksFlag.Name) || ctx.Bool(CaplinArchiveStatesFlag.Name) || ctx.Bool(CaplinArchiveBlobsFlag.Name)
+		cfg.CaplinConfig.ArchiveBlobs = ctx.Bool(CaplinArchiveBlobsFlag.Name)
+		cfg.CaplinConfig.BlobPruningDisabled = ctx.Bool(CaplinDisableBlobPruningFlag.Name)
+		cfg.CaplinConfig.ArchiveStates = ctx.Bool(CaplinArchiveStatesFlag.Name)
+	} else {
+		if ctx.IsSet(CaplinArchiveBlocksFlag.Name) {
+			log.Warn("Caplin's block backfilling is disabled when engine API is enabled")
+		}
+		if ctx.IsSet(CaplinArchiveStatesFlag.Name) {
+			log.Warn("Caplin's state backfilling is disabled when engine API is enabled")
+		}
+		if ctx.IsSet(CaplinArchiveBlobsFlag.Name) {
+			log.Warn("Caplin's blob backfilling is disabled when engine API is enabled")
+		}
+		if ctx.IsSet(CaplinImmediateBlobBackfillFlag.Name) {
+			log.Warn("Caplin's immediate blob backfilling is disabled when engine API is enabled")
+		}
+	}
+
 	cfg.CaplinConfig.ImmediateBlobsBackfilling = ctx.Bool(CaplinImmediateBlobBackfillFlag.Name)
-	cfg.CaplinConfig.BlobPruningDisabled = ctx.Bool(CaplinDisableBlobPruningFlag.Name)
+	cfg.CaplinConfig.SnapshotGenerationEnabled = ctx.Bool(CaplinEnableSnapshotGeneration.Name)
 	cfg.CaplinConfig.DisabledCheckpointSync = ctx.Bool(CaplinDisableCheckpointSyncFlag.Name)
-	cfg.CaplinConfig.ArchiveStates = ctx.Bool(CaplinArchiveStatesFlag.Name)
+	// bunch of extra stuff
 	cfg.CaplinConfig.MevRelayUrl = ctx.String(CaplinMevRelayUrl.Name)
 	cfg.CaplinConfig.EnableValidatorMonitor = ctx.Bool(CaplinValidatorMonitorFlag.Name)
 	if checkpointUrls := ctx.StringSlice(CaplinCheckpointSyncUrlFlag.Name); len(checkpointUrls) > 0 {
@@ -1887,6 +1937,16 @@ func SetEthConfig(ctx *cli.Context, nodeConfig *nodecfg.Config, cfg *ethconfig.C
 	cfg.CaplinConfig.CaplinDiscoveryAddr = ctx.String(CaplinDiscoveryAddrFlag.Name)
 	cfg.CaplinConfig.CaplinDiscoveryPort = ctx.Uint64(CaplinDiscoveryPortFlag.Name)
 	cfg.CaplinConfig.CaplinDiscoveryTCPPort = ctx.Uint64(CaplinDiscoveryTCPPortFlag.Name)
+	if ctx.Bool(KeepExecutionProofsFlag.Name) {
+		cfg.KeepExecutionProofs = true
+		state.EnableHistoricalCommitment()
+	}
+	if ctx.Bool(PersistReceiptsV2Flag.Name) {
+		cfg.PersistReceiptsCacheV2 = true
+		state.EnableHistoricalRCache()
+	}
+	cfg.PersistReceiptsV1 = ctx.Uint64(PersistReceiptsFlag.Name)
+
 	cfg.CaplinConfig.EnableUPnP = ctx.Bool(CaplinEnableUPNPlag.Name)
 	var err error
 	cfg.CaplinConfig.MaxInboundTrafficPerPeer, err = datasize.ParseString(ctx.String(CaplinMaxInboundTrafficPerPeerFlag.Name))

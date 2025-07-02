@@ -29,6 +29,7 @@ import (
 
 	"github.com/erigontech/erigon-lib/chain"
 	"github.com/erigontech/erigon-lib/common"
+	libcommon "github.com/erigontech/erigon-lib/common"
 	"github.com/erigontech/erigon-lib/common/generics"
 	"github.com/erigontech/erigon-lib/common/metrics"
 	"github.com/erigontech/erigon-lib/downloader/snaptype"
@@ -72,6 +73,7 @@ func NewPolygonSyncStageCfg(
 	userUnwindTypeOverrides []string,
 	notifications *shards.Notifications,
 	engineAPISwitcher sync.EngineAPISwitcher,
+	minedBlockReg sync.MinedBlockObserverRegistrar,
 ) PolygonSyncStageCfg {
 	// using a buffered channel to preserve order of tx actions,
 	// do not expect to ever have more than 50 goroutines blocking on this channel
@@ -138,7 +140,7 @@ func NewPolygonSyncStageCfg(
 		syncStore,
 		blockLimit,
 	)
-	events := polygonsync.NewTipEvents(logger, p2pService, heimdallService)
+	events := polygonsync.NewTipEvents(logger, p2pService, heimdallService, minedBlockReg)
 	sync := polygonsync.NewSync(
 		config,
 		logger,
@@ -1119,7 +1121,15 @@ func (s polygonSyncStageBridgeStore) Events(context.Context, uint64, uint64) ([]
 	panic("polygonSyncStageBridgeStore.Events not supported")
 }
 
-func (s polygonSyncStageBridgeStore) BlockEventIdsRange(context.Context, uint64) (uint64, uint64, bool, error) {
+func (s polygonSyncStageBridgeStore) EventsByTimeframe(ctx context.Context, timeFrom, timeTo uint64) ([][]byte, error) {
+	// used for accessing events in execution
+	// astrid stage integration intends to use the bridge only for scrapping
+	// not for reading which remains the same in execution (via BlockReader)
+	// astrid standalone mode introduces its own reader
+	panic("polygonSyncStageBridgeStore.EventsByTimeframe not supported")
+}
+
+func (s polygonSyncStageBridgeStore) BlockEventIdsRange(context.Context, libcommon.Hash, uint64) (uint64, uint64, bool, error) {
 	// used for accessing events in execution
 	// astrid stage integration intends to use the bridge only for scrapping
 	// not for reading which remains the same in execution (via BlockReader)

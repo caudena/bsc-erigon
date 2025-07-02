@@ -103,34 +103,10 @@ const (
 	EthTx    = "BlockTransaction" // tx_id_u64 -> rlp(tx)
 	MaxTxNum = "MaxTxNum"         // block_number_u64 -> max_tx_num_in_block_u64
 
-	Receipts = "Receipt"        // block_num_u64 -> canonical block receipts (non-canonical are not stored)
-	Log      = "TransactionLog" // block_num_u64 + txId -> logs of transaction
-
-	// Stores bitmap indices - in which block numbers saw logs of given 'address' or 'topic'
-	// [addr or topic] + [2 bytes inverted shard number] -> bitmap(blockN)
-	// indices are sharded - because some bitmaps are >1Mb and when new incoming blocks process it
-	//	 updates ~300 of bitmaps - by append small amount new values. It cause much big writes (MDBX does copy-on-write).
-	//
-	// if last existing shard size merge it with delta
-	// if serialized size of delta > ShardLimit - break down to multiple shards
-	// shard number - it's biggest value in bitmap
-	LogTopicIndex   = "LogTopicIndex"
-	LogAddressIndex = "LogAddressIndex"
-
-	// CallTraceSet is the name of the table that contain the mapping of block number to the set (sorted) of all accounts
-	// touched by call traces. It is DupSort-ed table
-	// 8-byte BE block number -> account address -> two bits (one for "from", another for "to")
-	CallTraceSet = "CallTraceSet"
-	// Indices for call traces - have the same format as LogTopicIndex and LogAddressIndex
-	// Store bitmap indices - in which block number we saw calls from (CallFromIndex) or to (CallToIndex) some addresses
-	CallFromIndex = "CallFromIndex"
-	CallToIndex   = "CallToIndex"
-
 	TxLookup = "BlockTransactionLookup" // hash -> transaction/receipt lookup metadata
 
-	ConfigTable = "Config" // config prefix for the db
-
-	PreimagePrefix = "SecureKey" // preimagePrefix + hash -> preima
+	ConfigTable   = "Config"       // config prefix for the db
+	ReceiptsCache = "ReceiptCache" // block_num_u64 + block_hash + txn_index_u32 -> rlp(receipt)
 
 	// Progress of sync stages: stageName -> stageData
 	SyncStageProgress = "SyncStage"
@@ -192,6 +168,7 @@ const (
 	BorEvents               = "BorEvents"                 // event_id -> event_payload
 	BorEventNums            = "BorEventNums"              // block_num -> event_id (last event_id in that block)
 	BorEventProcessedBlocks = "BorEventProcessedBlocks"   // block_num -> block_time, tracks processed blocks in the bridge, used for unwinds and restarts, gets pruned
+	BorEventTimes           = "BorEventTimes"             // timestamp -> event_id
 	BorSpans                = "BorSpans"                  // span_id -> span (in JSON encoding)
 	BorMilestones           = "BorMilestones"             // milestone_id -> milestone (in JSON encoding)
 	BorMilestoneEnds        = "BorMilestoneEnds"          // start block_num -> milestone_id (first block of milestone)
@@ -230,6 +207,11 @@ const (
 	TblReceiptHistoryKeys = "ReceiptHistoryKeys"
 	TblReceiptHistoryVals = "ReceiptHistoryVals"
 	TblReceiptIdx         = "ReceiptIdx"
+
+	TblRCacheVals        = "ReceiptCacheVals"
+	TblRCacheHistoryKeys = "ReceiptCacheHistoryKeys"
+	TblRCacheHistoryVals = "ReceiptCacheHistoryVals"
+	TblRCacheIdx         = "ReceiptCacheIdx"
 
 	TblLogAddressKeys = "LogAddressKeys"
 	TblLogAddressIdx  = "LogAddressIdx"
@@ -316,6 +298,15 @@ const (
 	RandaoMixes      = "RandaoMixes"      // [validator_index+slot] => [randao_mix]
 	Proposers        = "BlockProposers"   // epoch => proposers indicies
 
+	// Electra
+	PendingDepositsDump           = "PendingDepositsDump"           // block_num => dump
+	PendingPartialWithdrawalsDump = "PendingPartialWithdrawalsDump" // block_num => dump
+	PendingConsolidationsDump     = "PendingConsolidationsDump"     // block_num => dump
+	PendingDeposits               = "PendingDeposits"               // slot => queue_diffs
+	PendingPartialWithdrawals     = "PendingPartialWithdrawals"     // slot => queue_diffs
+	PendingConsolidations         = "PendingConsolidations"         // slot => queue_diffs
+	// End Electra
+
 	StatesProcessingProgress = "StatesProcessingProgress"
 
 	//Diagnostics tables
@@ -325,6 +316,9 @@ const (
 
 // Keys
 var (
+	// ExperimentalGetProofsLayout is used to keep track whether we store indecies to facilitate eth_getProof
+	CommitmentLayoutFlagKey = []byte("CommitmentLayoutFlag")
+
 	PruneTypeOlder = []byte("older")
 	PruneHistory   = []byte("pruneHistory")
 	PruneBlocks    = []byte("pruneBlocks")
@@ -342,6 +336,12 @@ var (
 	MinimumPrunableStepDomainKey = []byte("MinimumPrunableStepDomainKey")
 )
 
+// Vals
+var (
+	CommitmentLayoutFlagEnabledVal  = []byte{1}
+	CommitmentLayoutFlagDisabledVal = []byte{2}
+)
+
 // ChaindataTables - list of all buckets. App will panic if some bucket is not in this list.
 // This list will be sorted in `init` method.
 // ChaindataTablesCfg - can be used to find index in sorted version of ChaindataTables list by name
@@ -353,7 +353,7 @@ var ChaindataTables = []string{
 	HeaderNumber,
 	BadHeaderNumber,
 	BlockBody,
-	Receipts,
+	ReceiptsCache,
 	TxLookup,
 	ConfigTable,
 	DatabaseInfo,
@@ -369,12 +369,6 @@ var ChaindataTables = []string{
 	HeadHeaderKey,
 	LastForkchoice,
 	Migrations,
-	LogTopicIndex,
-	LogAddressIndex,
-	CallTraceSet,
-	CallFromIndex,
-	CallToIndex,
-	Log,
 	Sequence,
 	EthTx,
 	TrieOfAccounts,
@@ -390,6 +384,7 @@ var ChaindataTables = []string{
 	BorEvents,
 	BorEventNums,
 	BorEventProcessedBlocks,
+	BorEventTimes,
 	BorSpans,
 	BorMilestones,
 	BorMilestoneEnds,
@@ -420,6 +415,11 @@ var ChaindataTables = []string{
 	TblReceiptHistoryKeys,
 	TblReceiptHistoryVals,
 	TblReceiptIdx,
+
+	TblRCacheVals,
+	TblRCacheHistoryKeys,
+	TblRCacheHistoryVals,
+	TblRCacheIdx,
 
 	TblLogAddressKeys,
 	TblLogAddressIdx,
@@ -471,6 +471,12 @@ var ChaindataTables = []string{
 	CurrentSyncCommittee,
 	Eth1DataVotes,
 	IntraRandaoMixes,
+	PendingConsolidations,
+	PendingDeposits,
+	PendingDepositsDump,
+	PendingPartialWithdrawalsDump,
+	PendingConsolidationsDump,
+	PendingPartialWithdrawals,
 	ActiveValidatorIndicies,
 	EffectiveBalancesDump,
 	BalancesDump,
@@ -573,34 +579,42 @@ var ChaindataTablesCfg = TableCfg{
 		DupFromLen:                60,
 		DupToLen:                  28,
 	},
-	CallTraceSet: {Flags: DupSort},
 
-	TblAccountVals:           {Flags: DupSort},
-	TblAccountHistoryKeys:    {Flags: DupSort},
-	TblAccountHistoryVals:    {Flags: DupSort},
-	TblAccountIdx:            {Flags: DupSort},
-	TblStorageVals:           {Flags: DupSort},
-	TblStorageHistoryKeys:    {Flags: DupSort},
-	TblStorageHistoryVals:    {Flags: DupSort},
-	TblStorageIdx:            {Flags: DupSort},
-	TblCodeHistoryKeys:       {Flags: DupSort},
-	TblCodeIdx:               {Flags: DupSort},
+	TblAccountVals:        {Flags: DupSort},
+	TblAccountHistoryKeys: {Flags: DupSort},
+	TblAccountHistoryVals: {Flags: DupSort},
+	TblAccountIdx:         {Flags: DupSort},
+
+	TblStorageVals:        {Flags: DupSort},
+	TblStorageHistoryKeys: {Flags: DupSort},
+	TblStorageHistoryVals: {Flags: DupSort},
+	TblStorageIdx:         {Flags: DupSort},
+
+	TblCodeHistoryKeys: {Flags: DupSort},
+	TblCodeIdx:         {Flags: DupSort},
+
 	TblCommitmentVals:        {Flags: DupSort},
 	TblCommitmentHistoryKeys: {Flags: DupSort},
 	TblCommitmentHistoryVals: {Flags: DupSort},
 	TblCommitmentIdx:         {Flags: DupSort},
-	TblReceiptVals:           {Flags: DupSort},
-	TblReceiptHistoryKeys:    {Flags: DupSort},
-	TblReceiptHistoryVals:    {Flags: DupSort},
-	TblReceiptIdx:            {Flags: DupSort},
-	TblLogAddressKeys:        {Flags: DupSort},
-	TblLogAddressIdx:         {Flags: DupSort},
-	TblLogTopicsKeys:         {Flags: DupSort},
-	TblLogTopicsIdx:          {Flags: DupSort},
-	TblTracesFromKeys:        {Flags: DupSort},
-	TblTracesFromIdx:         {Flags: DupSort},
-	TblTracesToKeys:          {Flags: DupSort},
-	TblTracesToIdx:           {Flags: DupSort},
+
+	TblReceiptVals:        {Flags: DupSort},
+	TblReceiptHistoryKeys: {Flags: DupSort},
+	TblReceiptHistoryVals: {Flags: DupSort},
+	TblReceiptIdx:         {Flags: DupSort},
+
+	TblRCacheHistoryKeys: {Flags: DupSort},
+	TblRCacheIdx:         {Flags: DupSort},
+
+	TblLogAddressKeys: {Flags: DupSort},
+	TblLogAddressIdx:  {Flags: DupSort},
+	TblLogTopicsKeys:  {Flags: DupSort},
+	TblLogTopicsIdx:   {Flags: DupSort},
+
+	TblTracesFromKeys: {Flags: DupSort},
+	TblTracesFromIdx:  {Flags: DupSort},
+	TblTracesToKeys:   {Flags: DupSort},
+	TblTracesToIdx:    {Flags: DupSort},
 }
 
 var AuRaTablesCfg = TableCfg{
@@ -614,6 +628,7 @@ var BorTablesCfg = TableCfg{
 	BorEvents:               {Flags: DupSort},
 	BorEventNums:            {Flags: DupSort},
 	BorEventProcessedBlocks: {Flags: DupSort},
+	BorEventTimes:           {Flags: DupSort},
 	BorSpans:                {Flags: DupSort},
 	BorCheckpoints:          {Flags: DupSort},
 	BorCheckpointEnds:       {Flags: DupSort},
@@ -746,12 +761,13 @@ func reinit() {
 // Temporal
 
 const (
-	AccountsDomain   Domain = 0
-	StorageDomain    Domain = 1
-	CodeDomain       Domain = 2
-	CommitmentDomain Domain = 3
-	ReceiptDomain    Domain = 4
-	DomainLen        Domain = 5
+	AccountsDomain   Domain = 0 // Eth Accounts
+	StorageDomain    Domain = 1 // Eth Account's Storage
+	CodeDomain       Domain = 2 // Eth Smart-Contract Code
+	CommitmentDomain Domain = 3 // Merkle Trie
+	ReceiptDomain    Domain = 4 // Tiny Receipts - without logs. Required for node-operations.
+	RCacheDomain     Domain = 5 // Fat Receipts - with logs. Optional.
+	DomainLen        Domain = 6 // Technical marker of Enum. Not real Domain.
 )
 
 var StateDomains = []Domain{AccountsDomain, StorageDomain, CodeDomain, CommitmentDomain}
@@ -762,12 +778,67 @@ const (
 	CodeHistoryIdx       InvertedIdx = "CodeHistoryIdx"
 	CommitmentHistoryIdx InvertedIdx = "CommitmentHistoryIdx"
 	ReceiptHistoryIdx    InvertedIdx = "ReceiptHistoryIdx"
+	RCacheHistoryIdx     InvertedIdx = "ReceiptCacheHistoryIdx"
 
 	LogTopicIdx   InvertedIdx = "LogTopicIdx"
 	LogAddrIdx    InvertedIdx = "LogAddrIdx"
 	TracesFromIdx InvertedIdx = "TracesFromIdx"
 	TracesToIdx   InvertedIdx = "TracesToIdx"
 )
+
+func (idx InvertedIdx) String() string {
+	switch idx {
+	case AccountsHistoryIdx:
+		return "accounts"
+	case StorageHistoryIdx:
+		return "storage"
+	case CodeHistoryIdx:
+		return "code"
+	case CommitmentHistoryIdx:
+		return "commitment"
+	case ReceiptHistoryIdx:
+		return "receipt"
+	case RCacheHistoryIdx:
+		return "rcache"
+	case LogAddrIdx:
+		return "logaddrs"
+	case LogTopicIdx:
+		return "logtopics"
+	case TracesFromIdx:
+		return "tracesfrom"
+	case TracesToIdx:
+		return "tracesto"
+	default:
+		return "unknown index"
+	}
+}
+
+func String2InvertedIdx(in string) (InvertedIdx, error) {
+	switch in {
+	case "accounts":
+		return AccountsHistoryIdx, nil
+	case "storage":
+		return StorageHistoryIdx, nil
+	case "code":
+		return CodeHistoryIdx, nil
+	case "commitment":
+		return CommitmentHistoryIdx, nil
+	case "receipt":
+		return ReceiptHistoryIdx, nil
+	case "rcache":
+		return RCacheHistoryIdx, nil
+	case "logaddrs":
+		return LogAddrIdx, nil
+	case "logtopics":
+		return LogTopicIdx, nil
+	case "tracesfrom":
+		return TracesFromIdx, nil
+	case "tracesto":
+		return TracesToIdx, nil
+	default:
+		return "", fmt.Errorf("unknown inverted index name: %s", in)
+	}
+}
 
 const (
 	ReceiptsAppendable Appendable = 0
@@ -786,6 +857,8 @@ func (d Domain) String() string {
 		return "commitment"
 	case ReceiptDomain:
 		return "receipt"
+	case RCacheDomain:
+		return "rcache"
 	default:
 		return "unknown domain"
 	}
@@ -803,6 +876,8 @@ func String2Domain(in string) (Domain, error) {
 		return CommitmentDomain, nil
 	case "receipt":
 		return ReceiptDomain, nil
+	case "rcache":
+		return RCacheDomain, nil
 	default:
 		return Domain(MaxUint16), fmt.Errorf("unknown history name: %s", in)
 	}

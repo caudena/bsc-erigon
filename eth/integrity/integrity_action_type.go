@@ -20,6 +20,7 @@ type Check string
 
 const (
 	Blocks             Check = "Blocks"
+	HeaderNoGaps       Check = "HeaderNoGaps"
 	BlocksTxnID        Check = "BlocksTxnID"
 	InvertedIndex      Check = "InvertedIndex"
 	HistoryNoSystemTxs Check = "HistoryNoSystemTxs"
@@ -35,5 +36,5 @@ var AllChecks = []Check{
 }
 
 var NonDefaultChecks = []Check{
-	BorMilestones,
+	BorMilestones, ReceiptsNoDups,
 }

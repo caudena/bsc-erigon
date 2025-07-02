@@ -19,6 +19,7 @@ package bridge
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/types/known/emptypb"
@@ -70,9 +71,37 @@ func (r *Reader) Prepare(ctx context.Context) error {
 	return r.store.Prepare(ctx)
 }
 
+func (r *Reader) EventsWithinTime(ctx context.Context, timeFrom, timeTo time.Time) ([]*types.Message, error) {
+	events, err := r.store.EventsByTimeframe(ctx, uint64(timeFrom.Unix()), uint64(timeTo.Unix()))
+	if err != nil {
+		return nil, err
+	}
+
+	eventsRaw := make([]*types.Message, 0, len(events))
+
+	// convert to message
+	for _, event := range events {
+		msg := types.NewMessage(
+			state.SystemAddress,
+			&r.stateClientAddress,
+			0, u256.Num0,
+			core.SysCallGasLimit,
+			u256.Num0,
+			nil, nil,
+			event, nil, false,
+			true,
+			nil,
+		)
+
+		eventsRaw = append(eventsRaw, msg)
+	}
+
+	return eventsRaw, nil
+}
+
 // Events returns all sync events at blockNum
-func (r *Reader) Events(ctx context.Context, blockNum uint64) ([]*types.Message, error) {
-	start, end, ok, err := r.store.BlockEventIdsRange(ctx, blockNum)
+func (r *Reader) Events(ctx context.Context, blockHash libcommon.Hash, blockNum uint64) ([]*types.Message, error) {
+	start, end, ok, err := r.store.BlockEventIdsRange(ctx, blockHash, blockNum)
 	if err != nil {
 		return nil, err
 	}
@@ -105,7 +134,7 @@ func (r *Reader) Events(ctx context.Context, blockNum uint64) ([]*types.Message,
 			nil,
 		)
 
-		eventsRaw = append(eventsRaw, &msg)
+		eventsRaw = append(eventsRaw, msg)
 	}
 
 	return eventsRaw, nil
@@ -133,8 +162,10 @@ func NewRemoteReader(client remote.BridgeBackendClient) *RemoteReader {
 	}
 }
 
-func (r *RemoteReader) Events(ctx context.Context, blockNum uint64) ([]*types.Message, error) {
-	reply, err := r.client.BorEvents(ctx, &remote.BorEventsRequest{BlockNum: blockNum})
+func (r *RemoteReader) Events(ctx context.Context, blockHash libcommon.Hash, blockNum uint64) ([]*types.Message, error) {
+	reply, err := r.client.BorEvents(ctx, &remote.BorEventsRequest{
+		BlockNum:  blockNum,
+		BlockHash: gointerfaces.ConvertHashToH256(blockHash)})
 	if err != nil {
 		return nil, err
 	}
@@ -196,7 +227,7 @@ func messageFromData(to libcommon.Address, data []byte) *types.Message {
 		nil,
 	)
 
-	return &msg
+	return msg
 }
 
 // NewStateSyncEventMessages creates a corresponding message that can be passed to EVM for multiple state sync events
@@ -219,7 +250,7 @@ func NewStateSyncEventMessages(stateSyncEvents []rlp.RawValue, stateReceiverCont
 			nil,   // maxFeePerBlobGas
 		)
 
-		msgs[i] = &msg
+		msgs[i] = msg
 	}
 
 	return msgs

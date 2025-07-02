@@ -31,12 +31,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/holiman/uint256"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/semaphore"
 
 	"github.com/erigontech/erigon-lib/chain"
 	"github.com/erigontech/erigon-lib/chain/snapcfg"
+	"github.com/erigontech/erigon-lib/common"
 	common2 "github.com/erigontech/erigon-lib/common"
 	"github.com/erigontech/erigon-lib/common/background"
 	"github.com/erigontech/erigon-lib/common/datadir"
@@ -62,7 +62,6 @@ import (
 	"github.com/erigontech/erigon/polygon/heimdall"
 	"github.com/erigontech/erigon/turbo/services"
 	"github.com/erigontech/erigon/turbo/snapshotsync"
-	"github.com/erigontech/erigon/txnprovider/txpool"
 )
 
 type RoSnapshots struct {
@@ -300,12 +299,24 @@ func (br *BlockRetire) retireBlocks(ctx context.Context, minBlockNum uint64, max
 		}
 	}
 
+	merged, err := br.MergeBlocks(ctx, lvl, seedNewSnapshots)
+	return ok || merged, err
+}
+
+func (br *BlockRetire) MergeBlocks(ctx context.Context, lvl log.Lvl, seedNewSnapshots func(downloadRequest []snapshotsync.DownloadRequest) error) (merged bool, err error) {
+	notifier, logger, _, tmpDir, db, workers := br.notifier, br.logger, br.blockReader, br.tmpDir, br.db, br.workers
+	snapshots := br.snapshots()
+
 	merger := snapshotsync.NewMerger(tmpDir, workers, lvl, db, br.chainConfig, logger)
 	rangesToMerge := merger.FindMergeRanges(snapshots.Ranges(), snapshots.BlocksAvailable())
 	if len(rangesToMerge) == 0 {
-		return ok, nil
+		//TODO: enable, but optimize to reduce chain-tip impact
+		//if err := snapshots.RemoveOverlaps(); err != nil {
+		//	return false, err
+		//}
+		return false, nil
 	}
-	ok = true // have something to merge
+	merged = true
 	onMerge := func(r snapshotsync.Range) error {
 		if notifier != nil && !reflect.ValueOf(notifier).IsNil() { // notify about new snapshots of any size
 			notifier.OnNewSnapshot()
@@ -321,16 +332,15 @@ func (br *BlockRetire) retireBlocks(ctx context.Context, minBlockNum uint64, max
 		}
 		return nil
 	}
-	err := merger.Merge(ctx, &snapshots.RoSnapshots, snapshots.Types(), rangesToMerge, snapshots.Dir(), true /* doIndex */, onMerge, onDelete)
-	if err != nil {
-		return ok, err
+	if err = merger.Merge(ctx, &snapshots.RoSnapshots, snapshots.Types(), rangesToMerge, snapshots.Dir(), true /* doIndex */, onMerge, nil); err != nil {
+		return false, err
 	}
 
 	// remove old garbage files
-	if err := snapshots.RemoveOverlaps(); err != nil {
+	if err = snapshots.RemoveOverlaps(); err != nil {
 		return false, err
 	}
-	return ok, nil
+	return
 }
 
 var ErrNothingToPrune = errors.New("nothing to prune")
@@ -417,7 +427,7 @@ func (br *BlockRetire) RetireBlocks(ctx context.Context, requestedMinBlockNum ui
 	includeBor := br.chainConfig.Bor != nil
 	includeBsc := br.chainConfig.Parlia != nil
 
-	if err := br.BuildMissedIndicesIfNeed(ctx, "RetireBlocks", br.notifier, br.chainConfig); err != nil {
+	if err := br.BuildMissedIndicesIfNeed(ctx, "RetireBlocks", br.notifier); err != nil {
 		return err
 	}
 
@@ -477,24 +487,52 @@ func (br *BlockRetire) RetireBlocks(ctx context.Context, requestedMinBlockNum ui
 	return nil
 }
 
-func (br *BlockRetire) BuildMissedIndicesIfNeed(ctx context.Context, logPrefix string, notifier services.DBEventNotifier, cc *chain.Config) error {
-	if err := br.snapshots().BuildMissedIndices(ctx, logPrefix, notifier, br.dirs, cc, br.logger); err != nil {
+func (br *BlockRetire) BuildMissedIndicesIfNeed(ctx context.Context, logPrefix string, notifier services.DBEventNotifier) error {
+	if err := br.snapshots().BuildMissedIndices(ctx, logPrefix, notifier, br.dirs, br.chainConfig, br.logger); err != nil {
 		return err
 	}
 
-	if cc.Bor != nil {
-		if err := br.borSnapshots().RoSnapshots.BuildMissedIndices(ctx, logPrefix, notifier, br.dirs, cc, br.logger); err != nil {
+	if br.chainConfig.Bor != nil {
+		if err := br.borSnapshots().RoSnapshots.BuildMissedIndices(ctx, logPrefix, notifier, br.dirs, br.chainConfig, br.logger); err != nil {
 			return err
 		}
 	}
 
-	if cc.Parlia != nil {
-		if err := br.bscSnapshots().RoSnapshots.BuildMissedIndices(ctx, logPrefix, notifier, br.dirs, cc, br.logger); err != nil {
+	if br.chainConfig.Parlia != nil {
+		if err := br.bscSnapshots().RoSnapshots.BuildMissedIndices(ctx, logPrefix, notifier, br.dirs, br.chainConfig, br.logger); err != nil {
 			return err
 		}
 	}
 
 	return nil
+}
+func (br *BlockRetire) RemoveOverlaps() error {
+	if err := br.snapshots().RemoveOverlaps(); err != nil {
+		return err
+	}
+
+	if br.chainConfig.Bor != nil {
+		if err := br.borSnapshots().RoSnapshots.RemoveOverlaps(); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (br *BlockRetire) MadvNormal() *BlockRetire {
+	br.snapshots().MadvNormal()
+	if br.chainConfig.Bor != nil {
+		br.borSnapshots().RoSnapshots.MadvNormal()
+	}
+	return br
+}
+
+func (br *BlockRetire) DisableReadAhead() {
+	br.snapshots().DisableReadAhead()
+	if br.chainConfig.Bor != nil {
+		br.borSnapshots().RoSnapshots.DisableReadAhead()
+	}
 }
 
 func DumpBlocks(ctx context.Context, blockFrom, blockTo uint64, chainConfig *chain.Config, tmpDir, snapDir string, chainDB kv.RoDB, workers int, lvl log.Lvl, logger log.Logger, blockReader services.FullBlockReader) error {
@@ -604,29 +642,35 @@ func DumpTxs(ctx context.Context, db kv.RoDB, chainConfig *chain.Config, blockFr
 	warmupCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	chainID, _ := uint256.FromBig(chainConfig.ChainID)
-
 	numBuf := make([]byte, 8)
 
-	parse := func(ctx *txpool.TxnParseContext, v, valueBuf []byte, senders []common2.Address, j int) ([]byte, error) {
+	parse := func(v, valueBuf []byte, senders []common2.Address, j int) ([]byte, error) {
 		var sender [20]byte
-		slot := txpool.TxnSlot{}
-
-		if _, err := ctx.ParseTransaction(v, 0, &slot, sender[:], false /* hasEnvelope */, false /* wrappedWithBlobs */, nil); err != nil {
-			return valueBuf, err
+		txn2, err := types.DecodeTransaction(v)
+		if err != nil {
+			return nil, err
 		}
+		hash := txn2.Hash()
+		hashFirstByte := hash[:1]
 		if len(senders) > 0 {
+			txn2.SetSender(senders[j])
 			sender = senders[j]
+		} else {
+			signer := types.LatestSignerForChainID(chainConfig.ChainID)
+			sender, err = txn2.Sender(*signer)
+			if err != nil {
+				return nil, err
+			}
 		}
 
 		valueBuf = valueBuf[:0]
-		valueBuf = append(valueBuf, slot.IDHash[:1]...)
+		valueBuf = append(valueBuf, hashFirstByte...)
 		valueBuf = append(valueBuf, sender[:]...)
 		valueBuf = append(valueBuf, v...)
 		return valueBuf, nil
 	}
 
-	addSystemTx := func(ctx *txpool.TxnParseContext, tx kv.Tx, txId types.BaseTxnID) error {
+	addSystemTx := func(tx kv.Tx, txId types.BaseTxnID) error {
 		binary.BigEndian.PutUint64(numBuf, txId.U64())
 		tv, err := tx.GetOne(kv.EthTx, numBuf)
 		if err != nil {
@@ -639,12 +683,10 @@ func DumpTxs(ctx context.Context, db kv.RoDB, chainConfig *chain.Config, blockFr
 			return nil
 		}
 
-		ctx.WithSender(false)
-
 		valueBuf := bufPool.Get().(*[16 * 4096]byte)
 		defer bufPool.Put(valueBuf)
 
-		parsed, err := parse(ctx, tv, valueBuf[:], nil, 0)
+		parsed, err := parse(tv, valueBuf[:], nil, 0)
 		if err != nil {
 			return err
 		}
@@ -706,16 +748,14 @@ func DumpTxs(ctx context.Context, db kv.RoDB, chainConfig *chain.Config, blockFr
 		parsers.SetLimit(workers)
 
 		valueBufs := make([][]byte, workers)
-		parseCtxs := make([]*txpool.TxnParseContext, workers)
 
 		for i := 0; i < workers; i++ {
 			valueBuf := bufPool.Get().(*[16 * 4096]byte)
 			defer bufPool.Put(valueBuf)
 			valueBufs[i] = valueBuf[:]
-			parseCtxs[i] = txpool.NewTxnParseContext(*chainID)
 		}
 
-		if err := addSystemTx(parseCtxs[0], tx, body.BaseTxnID); err != nil {
+		if err := addSystemTx(tx, body.BaseTxnID); err != nil {
 			return false, err
 		}
 
@@ -732,14 +772,9 @@ func DumpTxs(ctx context.Context, db kv.RoDB, chainConfig *chain.Config, blockFr
 			j++
 
 			parsers.Go(func() error {
-				parseCtx := parseCtxs[tx%workers]
-
-				parseCtx.WithSender(len(senders) == 0)
-				parseCtx.WithAllowPreEip2s(blockNum <= chainConfig.HomesteadBlock.Uint64())
-
-				valueBuf, err := parse(parseCtx, tv, valueBufs[tx%workers], senders, tx)
-
+				valueBuf, err := parse(tv, valueBufs[tx%workers], senders, tx)
 				if err != nil {
+					log.Warn("[snapshots] DumpTxs parsing", "err", err, "blockNum", blockNum, "rlp", hex.EncodeToString(v))
 					return fmt.Errorf("%w, block: %d", err, blockNum)
 				}
 
@@ -770,7 +805,7 @@ func DumpTxs(ctx context.Context, db kv.RoDB, chainConfig *chain.Config, blockFr
 			return false, fmt.Errorf("ForAmount parser: %w", err)
 		}
 
-		if err := addSystemTx(parseCtxs[0], tx, types.BaseTxnID(body.BaseTxnID.LastSystemTx(body.TxCount))); err != nil {
+		if err := addSystemTx(tx, types.BaseTxnID(body.BaseTxnID.LastSystemTx(body.TxCount))); err != nil {
 			return false, err
 		}
 
@@ -778,13 +813,13 @@ func DumpTxs(ctx context.Context, db kv.RoDB, chainConfig *chain.Config, blockFr
 		case <-ctx.Done():
 			return false, ctx.Err()
 		case <-logEvery.C:
-			var m runtime.MemStats
 			if lvl >= log.LvlInfo {
+				var m runtime.MemStats
 				dbg.ReadMemStats(&m)
+				logger.Log(lvl, "[snapshots] Dumping txs", "block num", blockNum, "alloc", common2.ByteCount(m.Alloc), "sys", common2.ByteCount(m.Sys))
+			} else {
+				logger.Log(lvl, "[snapshots] Dumping txs", "block num", blockNum)
 			}
-			logger.Log(lvl, "[snapshots] Dumping txs", "block num", blockNum,
-				"alloc", common2.ByteCount(m.Alloc), "sys", common2.ByteCount(m.Sys),
-			)
 		default:
 		}
 		return true, nil
@@ -794,10 +829,38 @@ func DumpTxs(ctx context.Context, db kv.RoDB, chainConfig *chain.Config, blockFr
 	return 0, nil
 }
 
-// DumpHeaders - [from, to)
 func DumpHeaders(ctx context.Context, db kv.RoDB, _ *chain.Config, blockFrom, blockTo uint64, _ firstKeyGetter, collect func([]byte) error, workers int, lvl log.Lvl, logger log.Logger) (uint64, error) {
+	return DumpHeadersRaw(ctx, db, nil, blockFrom, blockTo, nil, collect, workers, lvl, logger, false)
+}
+
+// DumpHeaders - [from, to)
+func DumpHeadersRaw(ctx context.Context, db kv.RoDB, _ *chain.Config, blockFrom, blockTo uint64, _ firstKeyGetter, collect func([]byte) error, workers int, lvl log.Lvl, logger log.Logger, test bool) (uint64, error) {
 	logEvery := time.NewTicker(20 * time.Second)
 	defer logEvery.Stop()
+
+	// do hash sanity check
+	var (
+		prevHash  common.Hash
+		emptyHash common.Hash
+	)
+
+	// Make sure the canonical chain is not broken.
+	if blockFrom > 0 && !test {
+		if err := db.View(ctx, func(tx kv.Tx) error {
+			blockNum := blockFrom - 1
+			h, err := rawdb.ReadCanonicalHash(tx, blockNum)
+			if err != nil {
+				return err
+			}
+			if h == emptyHash {
+				return fmt.Errorf("header not found: %d", blockNum)
+			}
+			prevHash = h
+			return nil
+		}); err != nil {
+			return 0, err
+		}
+	}
 
 	key := make([]byte, 8+32)
 	from := hexutility.EncodeTs(blockFrom)
@@ -819,6 +882,11 @@ func DumpHeaders(ctx context.Context, db kv.RoDB, _ *chain.Config, blockFrom, bl
 		if err := rlp.DecodeBytes(dataRLP, &h); err != nil {
 			return false, err
 		}
+		// Make sure the canonical chain is not broken.
+		if prevHash != emptyHash && prevHash != h.ParentHash && !test {
+			return false, fmt.Errorf("header hash mismatch: %d, %x != %x", blockNum, prevHash, h.ParentHash)
+		}
+		prevHash = h.Hash()
 
 		value := make([]byte, len(dataRLP)+1) // first_byte_of_header_hash + header_rlp
 		value[0] = h.Hash()[0]
@@ -841,6 +909,24 @@ func DumpHeaders(ctx context.Context, db kv.RoDB, _ *chain.Config, blockFrom, bl
 		default:
 		}
 		return true, nil
+	}); err != nil {
+		return 0, err
+	}
+
+	// Make sure the canonical chain is not broken.
+	if err := db.View(ctx, func(tx kv.Tx) error {
+		if test {
+			return nil
+		}
+		blockNum := blockTo
+		h := rawdb.ReadHeaderByNumber(tx, blockNum)
+		if h == nil {
+			return fmt.Errorf("last header not found: %d", blockNum)
+		}
+		if prevHash != h.ParentHash {
+			return fmt.Errorf("header hash mismatch: %d, %x != %x", blockNum, prevHash, h.ParentHash)
+		}
+		return nil
 	}); err != nil {
 		return 0, err
 	}
@@ -993,6 +1079,11 @@ func RemoveIncompatibleIndices(dirs datadir.Dirs) error {
 			if errors.Is(err, recsplit.IncompatibleErr) {
 				_, fName := filepath.Split(fPath)
 				if err = os.Remove(fPath); err != nil {
+					log.Warn("Removing incompatible index", "file", fName, "err", err)
+				} else {
+					log.Info("Removing incompatible index", "file", fName)
+				}
+				if err = os.Remove(fPath + ".torrent"); err != nil {
 					log.Warn("Removing incompatible index", "file", fName, "err", err)
 				} else {
 					log.Info("Removing incompatible index", "file", fName)

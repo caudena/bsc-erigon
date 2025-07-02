@@ -98,7 +98,7 @@ func (b *blockCollector) Flush(ctx context.Context) error {
 		if len(v) == 0 {
 			return nil
 		}
-		v, err = utils.DecompressSnappy(v)
+		v, err = utils.DecompressSnappy(v, false)
 		if err != nil {
 			return err
 		}
@@ -148,7 +148,7 @@ func (b *blockCollector) Flush(ctx context.Context) error {
 			isForkchoiceNeeded := currentHeader == nil || blocksBatch[len(blocksBatch)-1].NumberU64() > currentHeader.Number.Uint64()
 			if inserted >= b.syncBackLoop {
 				if isForkchoiceNeeded {
-					if _, err := b.engine.ForkChoiceUpdate(ctx, lastBlockHash, lastBlockHash, nil); err != nil {
+					if _, err := b.engine.ForkChoiceUpdate(ctx, lastBlockHash, lastBlockHash, lastBlockHash, nil); err != nil {
 						b.logger.Warn("failed to update fork choice", "err", err)
 					}
 				}

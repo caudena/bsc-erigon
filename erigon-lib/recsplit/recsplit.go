@@ -219,13 +219,18 @@ func NewRecSplit(args RecSplitArgs, logger log.Logger) (*RecSplit, error) {
 	return rs, nil
 }
 
-func (rs *RecSplit) Salt() uint32 { return rs.salt }
+func (rs *RecSplit) FileName() string { return rs.indexFileName }
+func (rs *RecSplit) Salt() uint32     { return rs.salt }
 func (rs *RecSplit) Close() {
 	if rs.indexF != nil {
 		rs.indexF.Close()
+		_ = os.Remove(rs.indexF.Name())
+		rs.indexF = nil
 	}
 	if rs.existenceF != nil {
 		rs.existenceF.Close()
+		_ = os.Remove(rs.existenceF.Name())
+		rs.existenceF = nil
 	}
 	if rs.bucketCollector != nil {
 		rs.bucketCollector.Close()

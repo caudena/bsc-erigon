@@ -260,6 +260,10 @@ func AllTorrentPaths(dirs datadir.Dirs) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	l5, err := dir2.ListFiles(dirs.SnapCaplin, ".torrent")
+	if err != nil {
+		return nil, err
+	}
 	if dbg.DownloaderOnlyBlocks {
 		return files, nil
 	}
@@ -276,10 +280,6 @@ func AllTorrentPaths(dirs datadir.Dirs) ([]string, error) {
 		return nil, err
 	}
 	l4, err := dir2.ListFiles(dirs.SnapAccessors, ".torrent")
-	if err != nil {
-		return nil, err
-	}
-	l5, err := dir2.ListFiles(dirs.SnapCaplin, ".torrent")
 	if err != nil {
 		return nil, err
 	}
@@ -543,7 +543,9 @@ func VerifyFileFailFast(ctx context.Context, t *torrent.Torrent, root string, co
 		}
 		good := bytes.Equal(hasher.Sum(nil), p.Hash().Bytes())
 		if !good {
-			return fmt.Errorf("hash mismatch at piece %d, file: %s", i, t.Name())
+			err := fmt.Errorf("hash mismatch at piece %d, file: %s", i, t.Name())
+			log.Warn("[verify.failfast] ", "err", err)
+			return err
 		}
 
 		completePieces.Add(1)

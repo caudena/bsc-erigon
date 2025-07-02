@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/erigontech/erigon/execution/exec3"
 	chaos_monkey "github.com/erigontech/erigon/tests/chaos-monkey"
 
 	"github.com/erigontech/erigon-lib/common"
@@ -15,7 +16,6 @@ import (
 	"github.com/erigontech/erigon-lib/log/v3"
 	"github.com/erigontech/erigon-lib/metrics"
 	state2 "github.com/erigontech/erigon-lib/state"
-	"github.com/erigontech/erigon/cmd/state/exec3"
 	"github.com/erigontech/erigon/consensus"
 	"github.com/erigontech/erigon/core"
 	"github.com/erigontech/erigon/core/rawdb"
@@ -69,7 +69,7 @@ When rwLoop has nothing to do - it does Prune, or flush of WAL to RwTx (agg.rota
 */
 
 type executor interface {
-	execute(ctx context.Context, tasks []*state.TxTask) (bool, error)
+	execute(ctx context.Context, tasks []*state.TxTask, gp *core.GasPool) (bool, error)
 	status(ctx context.Context, commitThreshold uint64) error
 	wait() error
 	getHeader(ctx context.Context, hash common.Hash, number uint64) (h *types.Header)
@@ -239,7 +239,7 @@ func (pe *parallelExecutor) rwLoop(ctx context.Context, maxTxNum uint64, logger 
 
 		case <-pe.logEvery.C:
 			stepsInDB := rawdbhelpers.IdxStepsCountV3(tx)
-			pe.progress.Log("", pe.rs, pe.in, pe.rws, pe.rs.DoneCount(), 0 /* TODO logGas*/, pe.lastBlockNum.Load(), pe.outputBlockNum.GetValueUint64(), pe.outputTxNum.Load(), mxExecRepeats.GetValueUint64(), stepsInDB, pe.shouldGenerateChangesets, pe.inMemExec)
+			pe.progress.Log("", pe.rs, pe.in, pe.rws, pe.rs.DoneCount(), 0 /* TODO logGas*/, pe.lastBlockNum.Load(), pe.outputBlockNum.GetValueUint64(), pe.outputTxNum.Load(), mxExecRepeats.GetValueUint64(), stepsInDB, pe.shouldGenerateChangesets || pe.cfg.syncCfg.KeepExecutionProofs, pe.inMemExec)
 			if pe.agg.HasBackgroundFilesBuild() {
 				logger.Info(fmt.Sprintf("[%s] Background files build", pe.execStage.LogPrefix()), "progress", pe.agg.BackgroundProgress())
 			}
@@ -398,7 +398,7 @@ func (pe *parallelExecutor) processResultQueue(ctx context.Context, inputTxNum u
 			}
 
 			// resolve first conflict right here: it's faster and conflict-free
-			pe.applyWorker.RunTxTaskNoLock(txTask.Reset(), pe.isMining)
+			pe.applyWorker.RunTxTaskNoLock(txTask.Reset(), pe.isMining, false)
 			if txTask.Error != nil {
 				//fmt.Println("RETRY", txTask.TxNum, txTask.Error)
 				return outputTxNum, conflicts, triggers, processedBlockNum, false, fmt.Errorf("%w: %v", consensus.ErrInvalidBlock, txTask.Error)
@@ -531,7 +531,7 @@ func (pe *parallelExecutor) wait() error {
 	return nil
 }
 
-func (pe *parallelExecutor) execute(ctx context.Context, tasks []*state.TxTask) (bool, error) {
+func (pe *parallelExecutor) execute(ctx context.Context, tasks []*state.TxTask, gp *core.GasPool) (bool, error) {
 	for _, txTask := range tasks {
 		if txTask.Sender() != nil {
 			if ok := pe.rs.RegisterSender(txTask); ok {

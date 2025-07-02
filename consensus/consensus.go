@@ -22,9 +22,8 @@ package consensus
 
 import (
 	"context"
-	"math/big"
-
 	"github.com/holiman/uint256"
+	"math/big"
 
 	"github.com/erigontech/erigon-lib/chain"
 	libcommon "github.com/erigontech/erigon-lib/common"
@@ -168,7 +167,7 @@ type EngineWriter interface {
 	// Finalize runs any post-transaction state modifications (e.g. block rewards)
 	// but does not assemble the block.
 	Finalize(config *chain.Config, header *types.Header, state *state.IntraBlockState,
-		txs types.Transactions, uncles []*types.Header, receipts types.Receipts, withdrawals []*types.Withdrawal, chain ChainReader, syscall SystemCall, systemTxCall SystemTxCall, TxIndex int, logger log.Logger,
+		txs types.Transactions, uncles []*types.Header, receipts types.Receipts, withdrawals []*types.Withdrawal, chain ChainReader, syscall SystemCall, skipReceiptsEval bool, systemTxCall SystemTxCall, TxIndex int, logger log.Logger,
 	) (types.Transactions, types.Receipts, types.FlatRequests, error)
 
 	// FinalizeAndAssemble runs any post-transaction state modifications (e.g. block
@@ -223,6 +222,7 @@ type PoSA interface {
 	GetFinalizedHeader(chain ChainHeaderReader, header *types.Header) *types.Header
 	ResetSnapshot(chain ChainHeaderReader, headers []*types.Header) error
 	GetLatestSnapshotHeight() (uint64, error)
+	BlockInterval(chain ChainHeaderReader, header *types.Header) (uint64, error)
 }
 
 type AsyncEngine interface {

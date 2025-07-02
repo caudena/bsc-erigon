@@ -372,6 +372,19 @@ func RialtoGenesisBlock() *types.Genesis {
 	}
 }
 
+// HoodiGenesisBlock returns the Hoodi network genesis block.
+func HoodiGenesisBlock() *types.Genesis {
+	return &types.Genesis{
+		Config:     params.HoodiChainConfig,
+		Nonce:      0x1234,
+		ExtraData:  []byte(""),
+		GasLimit:   0x2255100, // 36M
+		Difficulty: big.NewInt(1),
+		Timestamp:  1742212800,
+		Alloc:      readPrealloc("allocs/hoodi.json"),
+	}
+}
+
 // AmoyGenesisBlock returns the Amoy network genesis block.
 func AmoyGenesisBlock() *types.Genesis {
 	return &types.Genesis{
@@ -562,10 +575,7 @@ func GenesisToBlock(g *types.Genesis, dirs datadir.Dirs, logger log.Logger) (*ty
 		}
 		defer agg.Close()
 
-		tdb, err := temporal.New(genesisTmpDB, agg)
-		if err != nil {
-			return err
-		}
+		tdb := temporal.New(genesisTmpDB, agg)
 		defer tdb.Close()
 
 		tx, err := tdb.BeginTemporalRw(ctx)
@@ -686,6 +696,8 @@ func GenesisBlockByChainName(chain string) *types.Genesis {
 		return ChapelGenesisBlock()
 	case networkname.Rialto:
 		return RialtoGenesisBlock()
+	case networkname.Hoodi:
+		return HoodiGenesisBlock()
 	case networkname.Amoy:
 		return AmoyGenesisBlock()
 	case networkname.BorMainnet:

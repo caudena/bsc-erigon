@@ -42,6 +42,9 @@ type Version uint8
 
 func ParseVersion(v string) (Version, error) {
 	if strings.HasPrefix(v, "v") {
+		if strings.Contains(v, ".") {
+			panic("downgrade from main (or release/3.1+) erigon branch to release/3.0 is not maintainable. If you want to do it anyway, do full resync for it. Otherwise use main branch")
+		}
 		v, err := strconv.ParseUint(v[1:], 10, 8)
 
 		if err != nil {
@@ -555,7 +558,7 @@ func BuildIndexWithSnapName(ctx context.Context, info FileInfo, cfg recsplit.Rec
 func ExtractRange(ctx context.Context, f FileInfo, extractor RangeExtractor, indexBuilder IndexBuilder, firstKey FirstKeyGetter, chainDB kv.RoDB, chainConfig *chain.Config, tmpDir string, workers int, lvl log.Lvl, logger log.Logger) (uint64, error) {
 	var lastKeyValue uint64
 
-	sn, err := seg.NewCompressor(ctx, "Snapshot "+f.Type.Name(), f.Path, tmpDir, seg.DefaultCfg, log.LvlTrace, logger)
+	sn, err := seg.NewCompressor(ctx, "Snapshot "+f.Type.Name(), f.Path, tmpDir, seg.DefaultCfg, lvl, logger)
 
 	if err != nil {
 		return lastKeyValue, err

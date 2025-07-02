@@ -40,19 +40,20 @@ import (
 
 // CallArgs represents the arguments for a call.
 type CallArgs struct {
-	From                 *libcommon.Address `json:"from"`
-	To                   *libcommon.Address `json:"to"`
-	Gas                  *hexutil.Uint64    `json:"gas"`
-	GasPrice             *hexutil.Big       `json:"gasPrice"`
-	MaxPriorityFeePerGas *hexutil.Big       `json:"maxPriorityFeePerGas"`
-	MaxFeePerGas         *hexutil.Big       `json:"maxFeePerGas"`
-	MaxFeePerBlobGas     *hexutil.Big       `json:"maxFeePerBlobGas"`
-	Value                *hexutil.Big       `json:"value"`
-	Nonce                *hexutil.Uint64    `json:"nonce"`
-	Data                 *hexutility.Bytes  `json:"data"`
-	Input                *hexutility.Bytes  `json:"input"`
-	AccessList           *types.AccessList  `json:"accessList"`
-	ChainID              *hexutil.Big       `json:"chainId,omitempty"`
+	From                 *libcommon.Address        `json:"from"`
+	To                   *libcommon.Address        `json:"to"`
+	Gas                  *hexutil.Uint64           `json:"gas"`
+	GasPrice             *hexutil.Big              `json:"gasPrice"`
+	MaxPriorityFeePerGas *hexutil.Big              `json:"maxPriorityFeePerGas"`
+	MaxFeePerGas         *hexutil.Big              `json:"maxFeePerGas"`
+	MaxFeePerBlobGas     *hexutil.Big              `json:"maxFeePerBlobGas"`
+	Value                *hexutil.Big              `json:"value"`
+	Nonce                *hexutil.Uint64           `json:"nonce"`
+	Data                 *hexutility.Bytes         `json:"data"`
+	Input                *hexutility.Bytes         `json:"input"`
+	AccessList           *types.AccessList         `json:"accessList"`
+	ChainID              *hexutil.Big              `json:"chainId,omitempty"`
+	AuthorizationList    []types.JsonAuthorization `json:"authorizationList"`
 }
 
 // from retrieves the transaction sender address.
@@ -64,10 +65,10 @@ func (arg *CallArgs) from() libcommon.Address {
 }
 
 // ToMessage converts CallArgs to the Message type used by the core evm
-func (args *CallArgs) ToMessage(globalGasCap uint64, baseFee *uint256.Int) (types.Message, error) {
+func (args *CallArgs) ToMessage(globalGasCap uint64, baseFee *uint256.Int) (*types.Message, error) {
 	// Reject invalid combinations of pre- and post-1559 fee styles
 	if args.GasPrice != nil && (args.MaxFeePerGas != nil || args.MaxPriorityFeePerGas != nil) {
-		return types.Message{}, errors.New("both gasPrice and (maxFeePerGas or maxPriorityFeePerGas) specified")
+		return nil, errors.New("both gasPrice and (maxFeePerGas or maxPriorityFeePerGas) specified")
 	}
 	// Set sender address or use zero address if none specified.
 	addr := args.from()
@@ -97,7 +98,7 @@ func (args *CallArgs) ToMessage(globalGasCap uint64, baseFee *uint256.Int) (type
 		if args.GasPrice != nil {
 			overflow := gasPrice.SetFromBig(args.GasPrice.ToInt())
 			if overflow {
-				return types.Message{}, errors.New("args.GasPrice higher than 2^256-1")
+				return nil, errors.New("args.GasPrice higher than 2^256-1")
 			}
 		}
 		gasFeeCap, gasTipCap = gasPrice, gasPrice
@@ -108,7 +109,7 @@ func (args *CallArgs) ToMessage(globalGasCap uint64, baseFee *uint256.Int) (type
 			gasPrice = new(uint256.Int)
 			overflow := gasPrice.SetFromBig(args.GasPrice.ToInt())
 			if overflow {
-				return types.Message{}, errors.New("args.GasPrice higher than 2^256-1")
+				return nil, errors.New("args.GasPrice higher than 2^256-1")
 			}
 			gasFeeCap, gasTipCap = gasPrice, gasPrice
 		} else {
@@ -117,14 +118,14 @@ func (args *CallArgs) ToMessage(globalGasCap uint64, baseFee *uint256.Int) (type
 			if args.MaxFeePerGas != nil {
 				overflow := gasFeeCap.SetFromBig(args.MaxFeePerGas.ToInt())
 				if overflow {
-					return types.Message{}, errors.New("args.GasPrice higher than 2^256-1")
+					return nil, errors.New("args.GasPrice higher than 2^256-1")
 				}
 			}
 			gasTipCap = new(uint256.Int)
 			if args.MaxPriorityFeePerGas != nil {
 				overflow := gasTipCap.SetFromBig(args.MaxPriorityFeePerGas.ToInt())
 				if overflow {
-					return types.Message{}, errors.New("args.GasPrice higher than 2^256-1")
+					return nil, errors.New("args.GasPrice higher than 2^256-1")
 				}
 			}
 			// Backfill the legacy gasPrice for EVM execution, unless we're all zeroes
@@ -136,7 +137,7 @@ func (args *CallArgs) ToMessage(globalGasCap uint64, baseFee *uint256.Int) (type
 		if args.MaxFeePerBlobGas != nil {
 			blobFee, overflow := uint256.FromBig(args.MaxFeePerBlobGas.ToInt())
 			if overflow {
-				return types.Message{}, errors.New("args.MaxFeePerBlobGas higher than 2^256-1")
+				return nil, errors.New("args.MaxFeePerBlobGas higher than 2^256-1")
 			}
 			maxFeePerBlobGas = blobFee
 		}
@@ -146,7 +147,7 @@ func (args *CallArgs) ToMessage(globalGasCap uint64, baseFee *uint256.Int) (type
 	if args.Value != nil {
 		overflow := value.SetFromBig(args.Value.ToInt())
 		if overflow {
-			return types.Message{}, errors.New("args.Value higher than 2^256-1")
+			return nil, errors.New("args.Value higher than 2^256-1")
 		}
 	}
 	var data []byte
@@ -161,6 +162,19 @@ func (args *CallArgs) ToMessage(globalGasCap uint64, baseFee *uint256.Int) (type
 	}
 
 	msg := types.NewMessage(addr, args.To, 0, value, gas, gasPrice, gasFeeCap, gasTipCap, data, accessList, false /* checkNonce */, false /* isFree */, maxFeePerBlobGas)
+
+	if args.AuthorizationList != nil {
+		authorizations := make([]types.Authorization, len(args.AuthorizationList))
+		for i, auth := range args.AuthorizationList {
+			var err error
+			authorizations[i], err = auth.ToAuthorization()
+			if err != nil {
+				return &types.Message{}, err
+			}
+		}
+		msg.SetAuthorizations(authorizations)
+	}
+
 	return msg, nil
 }
 

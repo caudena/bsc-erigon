@@ -2443,6 +2443,9 @@ func (d *Downloader) AddNewSeedableFile(ctx context.Context, name string) error 
 				return nil
 			}
 		} else {
+			if ff.Type == nil {
+				panic(fmt.Sprintf("nil ptr after parsing file: %s", name))
+			}
 			if !d.cfg.SnapshotConfig.Seedable(ff) {
 				return nil
 			}
@@ -2894,4 +2897,12 @@ func (d *Downloader) CompletedTorrents() map[string]completedTorrentInfo {
 	defer d.lock.RUnlock()
 
 	return d.completedTorrents
+}
+
+// Expose torrent client status to HTTP on the public/default serve mux used by GOPPROF=http. Only
+// do this if you have a single instance.
+func (d *Downloader) HandleTorrentClientStatus() {
+	http.HandleFunc("/downloaderTorrentClientStatus", func(w http.ResponseWriter, r *http.Request) {
+		d.torrentClient.WriteStatus(w)
+	})
 }

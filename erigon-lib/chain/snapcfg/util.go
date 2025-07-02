@@ -35,8 +35,15 @@ import (
 	"github.com/erigontech/erigon-snapshot/webseed"
 
 	"github.com/erigontech/erigon-lib/chain/networkname"
+	"github.com/erigontech/erigon-lib/common/dbg"
 	"github.com/erigontech/erigon-lib/downloader/snaptype"
+	"github.com/erigontech/erigon-lib/log/v3"
 )
+
+// TODO(yperbasis) move into params/version.go
+const DefaultSnapshotGitBranch = "main"
+
+var snapshotGitBranch = dbg.EnvString("SNAPS_GIT_BRANCH", DefaultSnapshotGitBranch)
 
 var (
 	Mainnet    = fromToml(snapshothashes.Mainnet)
@@ -132,6 +139,10 @@ func (p Preverified) Typed(types []snaptype.Type) Preverified {
 		include := false
 		if strings.Contains(name, "transactions-to-block") { // transactions-to-block should just be "transactions" type
 			typeName = "transactions"
+		}
+
+		if strings.Contains(name, "blocksidecars") {
+			typeName = "bscblobsidecars"
 		}
 
 		for _, typ := range types {
@@ -557,9 +568,15 @@ func webseedsParse(in []byte) (res []string) {
 }
 
 func LoadRemotePreverified(ctx context.Context) (loaded bool, err error) {
-	loaded, err = snapshothashes.LoadSnapshots(ctx)
+	loaded, err = snapshothashes.LoadSnapshots(ctx, snapshothashes.R2, snapshotGitBranch)
 	if err != nil {
-		return false, err
+		log.Root().Warn("Failed to load snapshot hashes from R2; falling back to GitHub", "err", err)
+
+		// Fallback to github if R2 fails
+		loaded, err = snapshothashes.LoadSnapshots(ctx, snapshothashes.Github, snapshotGitBranch)
+		if err != nil {
+			return false, err
+		}
 	}
 
 	// Re-load the preverified hashes

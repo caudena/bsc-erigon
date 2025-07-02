@@ -25,9 +25,6 @@ import (
 	"math"
 	"strings"
 
-	"github.com/erigontech/erigon-lib/kv/rawdbv3"
-	"github.com/erigontech/erigon/turbo/snapshotsync/freezeblocks"
-
 	"github.com/holiman/uint256"
 
 	libcommon "github.com/erigontech/erigon-lib/common"

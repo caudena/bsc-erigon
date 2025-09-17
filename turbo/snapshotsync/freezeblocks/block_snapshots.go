@@ -35,6 +35,7 @@ import (
 	"golang.org/x/sync/semaphore"
 
 	"github.com/erigontech/erigon-lib/chain"
+	"github.com/erigontech/erigon-lib/chain/networkname"
 	"github.com/erigontech/erigon-lib/chain/snapcfg"
 	"github.com/erigontech/erigon-lib/common"
 	common2 "github.com/erigontech/erigon-lib/common"
@@ -131,7 +132,10 @@ func chooseSegmentEnd(from, to uint64, snapType snaptype.Enum, chainConfig *chai
 	if chainConfig != nil {
 		chainName = chainConfig.ChainName
 	}
-	blocksPerFile := snapcfg.MergeLimitFromCfg(snapcfg.KnownCfg(chainName), snapType, from)
+	blocksPerFile := uint64(snaptype.Erigon2OldMergeLimit)
+	if chainName != networkname.BSC && chainName != networkname.Chapel {
+		blocksPerFile = snapcfg.MergeLimitFromCfg(snapcfg.KnownCfg(chainName), snapType, from)
+	}
 
 	next := (from/blocksPerFile + 1) * blocksPerFile
 	to = min(next, to)
@@ -413,6 +417,9 @@ func (br *BlockRetire) RetireBlocksInBackground(ctx context.Context, minBlockNum
 		}
 
 		err := br.RetireBlocks(ctx, minBlockNum, maxBlockNum, lvl, seedNewSnapshots, onDeleteSnapshots, onFinishRetire)
+		if errors.Is(err, heimdall.ErrHeimdallDataIsNotReady) {
+			return
+		}
 		if err != nil {
 			br.logger.Warn("[snapshots] retire blocks", "err", err)
 			return
@@ -425,7 +432,7 @@ func (br *BlockRetire) RetireBlocks(ctx context.Context, requestedMinBlockNum ui
 		br.maxScheduledBlock.Store(requestedMaxBlockNum)
 	}
 	includeBor := br.chainConfig.Bor != nil
-	includeBsc := br.chainConfig.Parlia != nil
+	includeBsc := br.chainConfig.Parlia != nil && br.bs.BlobKept()
 
 	if err := br.BuildMissedIndicesIfNeed(ctx, "RetireBlocks", br.notifier); err != nil {
 		return err
@@ -525,6 +532,9 @@ func (br *BlockRetire) MadvNormal() *BlockRetire {
 	if br.chainConfig.Bor != nil {
 		br.borSnapshots().RoSnapshots.MadvNormal()
 	}
+	if br.chainConfig.Parlia != nil {
+		br.bscSnapshots().RoSnapshots.MadvNormal()
+	}
 	return br
 }
 
@@ -532,6 +542,9 @@ func (br *BlockRetire) DisableReadAhead() {
 	br.snapshots().DisableReadAhead()
 	if br.chainConfig.Bor != nil {
 		br.borSnapshots().RoSnapshots.DisableReadAhead()
+	}
+	if br.chainConfig.Parlia != nil {
+		br.bscSnapshots().RoSnapshots.DisableReadAhead()
 	}
 }
 
@@ -576,10 +589,10 @@ var BlockCompressCfg = seg.Cfg{
 	MinPatternScore: 1_000,
 	MinPatternLen:   8, // `5` - reducing ratio because producing too much prefixes
 	MaxPatternLen:   128,
-	SamplingFactor:  4,         // not 1 - just to save my time
-	MaxDictPatterns: 16 * 1024, // the lower RAM used by huffman tree (arrays)
+	SamplingFactor:  1,         // `4` - to save time, '1' - to save disk space
+	MaxDictPatterns: 64 * 1024, // the lower RAM used by huffman tree (arrays)
 
-	DictReducerSoftLimit: 1_000_000,
+	DictReducerSoftLimit: 2_000_000,
 	Workers:              1,
 }
 
@@ -598,7 +611,7 @@ func dumpRange(ctx context.Context, f snaptype.FileInfo, dumper dumpFunc, firstK
 	// Means:
 	//  - build must be fast
 	//  - merge can be slow and expensive
-	noCompress := (f.To - f.From) < (snaptype.Erigon2MergeLimit - 1)
+	noCompress := (f.To - f.From) < (snaptype.Erigon2OldMergeLimit - 1)
 
 	lastKeyValue, err = dumper(ctx, chainDB, chainConfig, f.From, f.To, firstKey, func(v []byte) error {
 		if noCompress {

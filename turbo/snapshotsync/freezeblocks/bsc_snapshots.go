@@ -2,19 +2,21 @@ package freezeblocks
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"reflect"
+	"time"
 
 	"github.com/erigontech/erigon-lib/chain"
 	"github.com/erigontech/erigon-lib/chain/networkname"
-	"github.com/erigontech/erigon-lib/chain/snapcfg"
+	"github.com/erigontech/erigon-lib/common"
 	"github.com/erigontech/erigon-lib/common/background"
+	"github.com/erigontech/erigon-lib/common/hexutility"
 	"github.com/erigontech/erigon-lib/downloader/snaptype"
 	"github.com/erigontech/erigon-lib/kv"
 	"github.com/erigontech/erigon-lib/log/v3"
 	"github.com/erigontech/erigon-lib/rlp"
 	"github.com/erigontech/erigon-lib/seg"
-	"github.com/erigontech/erigon/cmd/hack/tool/fromdb"
 	coresnaptype "github.com/erigontech/erigon/core/snaptype"
 	"github.com/erigontech/erigon/core/types"
 	"github.com/erigontech/erigon/eth/ethconfig"
@@ -38,37 +40,57 @@ func (br *BlockRetire) retireBscBlocks(ctx context.Context, minBlockNum uint64, 
 	default:
 	}
 
+	startTime := time.Now()
 	snapshots := br.bscSnapshots()
-
-	chainConfig := fromdb.ChainConfig(br.db)
-	var minimumBlob uint64
 	notifier, logger, blockReader, tmpDir, db, workers := br.notifier, br.logger, br.blockReader, br.tmpDir, br.db, br.workers
-	if chainConfig.ChainName == networkname.BSC {
+
+	var minimumBlob uint64
+	if br.chainConfig.ChainName == networkname.BSC {
 		minimumBlob = bscMinSegFrom
 	} else {
 		minimumBlob = chapelMinSegFrom
 	}
-	blockFrom := max(blockReader.FrozenBscBlobs()+1, minimumBlob)
+
 	blocksRetired := false
+	totalSegments := 0
+	var blockFrom uint64
+
 	for _, snap := range blockReader.BscSnapshots().Types() {
-		if maxBlockNum <= blockFrom || maxBlockNum-blockFrom < snaptype.Erigon2MergeLimit {
+		minSnapBlockNum := max(snapshots.DirtyBlocksAvailable(snap.Enum()), minBlockNum, minimumBlob)
+
+		if maxBlockNum <= minSnapBlockNum || maxBlockNum-minSnapBlockNum < snaptype.Erigon2OldMergeLimit {
 			continue
 		}
 
+		blockFrom = minSnapBlockNum + 1
 		blockTo := maxBlockNum
 
-		logger.Log(lvl, "[bsc snapshot] Retire Bsc Blobs", "type", snap,
-			"range", fmt.Sprintf("%d-%d", blockFrom, blockTo))
+		logger.Log(lvl, "[bsc snapshots] Retire BSC Blobs", "type", snap,
+			"blockFrom", blockFrom, "blockTo", blockTo)
+		segmentStartTime := time.Now()
+		for i := blockFrom; i < blockTo; {
+			if blockTo-i < snaptype.Erigon2OldMergeLimit {
+				break
+			}
+			to := chooseSegmentEnd(i, blockTo, snap.Enum(), br.chainConfig)
+			logger.Log(lvl, "[bsc snapshots] Dumping blobs sidecars", "from", i, "to", to)
+			blocksRetired = true
+			if err := DumpBlobs(ctx, i, to, br.chainConfig, tmpDir, snapshots.Dir(), db, workers, lvl, blockReader, br.bs, logger); err != nil {
+				return blocksRetired, fmt.Errorf("[bsc snapshots] DumpBlobs: %d-%d: %w", i, to, err)
+			}
+			logger.Log(lvl, "[bsc snapshots] Segment dumped", "i", i, "to", to)
+			totalSegments++
 
-		blocksRetired = true
-		if err := DumpBlobs(ctx, blockFrom, blockTo, br.chainConfig, tmpDir, snapshots.Dir(), db, workers, lvl, blockReader, br.bs, logger); err != nil {
-			return true, fmt.Errorf("DumpBlobs: %w", err)
+			// Manually update loop variable
+			i = to
 		}
+		segmentDuration := time.Since(segmentStartTime)
+		logger.Log(lvl, "[bsc snapshots] All segments dumped for type", "type", snap, "duration", segmentDuration, "segments", totalSegments)
 	}
 
 	if blocksRetired {
 		if err := snapshots.OpenFolder(); err != nil {
-			return true, fmt.Errorf("reopen: %w", err)
+			return blocksRetired, fmt.Errorf("reopen: %w", err)
 		}
 		snapshots.LogStat("bsc:retire")
 		if notifier != nil && !reflect.ValueOf(notifier).IsNil() { // notify about new snapshots of any size
@@ -76,17 +98,14 @@ func (br *BlockRetire) retireBscBlocks(ctx context.Context, minBlockNum uint64, 
 		}
 
 		// now prune blobs from the database
-		blockTo := (maxBlockNum / snaptype.Erigon2MergeLimit) * snaptype.Erigon2MergeLimit
+		blockTo := (maxBlockNum / snaptype.Erigon2OldMergeLimit) * snaptype.Erigon2OldMergeLimit
 		roTx, err := db.BeginRo(ctx)
 		if err != nil {
 			return false, nil
 		}
 		defer roTx.Rollback()
-
+		cleanupStart := time.Now()
 		for i := blockFrom; i < blockTo; i++ {
-			if i%10000 == 0 {
-				logger.Info("remove sidecars", "blockNum", i)
-			}
 			blockHash, _, err := blockReader.CanonicalHash(ctx, roTx, i)
 			if err != nil {
 				return false, err
@@ -94,16 +113,25 @@ func (br *BlockRetire) retireBscBlocks(ctx context.Context, minBlockNum uint64, 
 			if err = br.bs.RemoveBlobSidecars(ctx, i, blockHash); err != nil {
 				logger.Error("remove sidecars", "blockNum", i, "err", err)
 			}
-
 		}
+		cleanupDuration := time.Since(cleanupStart)
+		logger.Log(lvl, "[bsc snapshots] Blob cleanup completed", "duration", cleanupDuration)
+
 		if seedNewSnapshots != nil {
 			downloadRequest := []snapshotsync.DownloadRequest{
 				snapshotsync.NewDownloadRequest("", ""),
 			}
 			if err := seedNewSnapshots(downloadRequest); err != nil {
-				return false, err
+				return blocksRetired, err
 			}
 		}
+	}
+
+	retireDuration := time.Since(startTime)
+
+	totalDuration := time.Since(startTime)
+	if blocksRetired {
+		logger.Log(lvl, "[bsc snapshots] BSC total operation completed", "totalDuration", totalDuration, "retireDuration", retireDuration)
 	}
 
 	return blocksRetired, nil
@@ -150,6 +178,7 @@ func (v *BscView) BlobSidecarsSegment(blockNum uint64) (*snapshotsync.VisibleSeg
 }
 
 func dumpBlobsRange(ctx context.Context, blockFrom, blockTo uint64, tmpDir, snapDir string, chainDB kv.RoDB, blobStore services.BlobStorage, blockReader services.FullBlockReader, chainConfig *chain.Config, workers int, lvl log.Lvl, logger log.Logger) (err error) {
+	startTime := time.Now()
 	f := coresnaptype.BlobSidecars.FileInfo(snapDir, blockFrom, blockTo)
 	sn, err := seg.NewCompressor(ctx, "Snapshot "+f.Type.Name(), f.Path, tmpDir, seg.DefaultCfg, log.LvlTrace, logger)
 	if err != nil {
@@ -157,73 +186,98 @@ func dumpBlobsRange(ctx context.Context, blockFrom, blockTo uint64, tmpDir, snap
 	}
 	defer sn.Close()
 
-	tx, err := chainDB.BeginRo(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
+	// Use BigChunks pattern to avoid long transactions
+	from := hexutility.EncodeTs(blockFrom)
 
-	// Generate .seg file, which is just the list of beacon blocks.
-	for i := blockFrom; i < blockTo; i++ {
-		// read root.
-		blockHash, _, err := blockReader.CanonicalHash(ctx, tx, i)
-		if err != nil {
-			return err
+	dataProcessingStart := time.Now()
+	processedBlocks := uint64(0)
+	emptyBlocks := uint64(0)
+	blobBlocks := uint64(0)
+
+	if err := kv.BigChunks(chainDB, kv.HeaderCanonical, from, func(tx kv.Tx, k, v []byte) (bool, error) {
+		blockNum := binary.BigEndian.Uint64(k)
+		if blockNum >= blockTo {
+			return false, nil
 		}
+
+		blockHash := common.BytesToHash(v)
 
 		blobTxCount, err := blobStore.BlobTxCount(ctx, blockHash)
 		if err != nil {
-			return err
-		}
-		if blobTxCount == 0 {
-			sn.AddWord(nil)
-			continue
-		}
-		sidecars, found, err := blobStore.ReadBlobSidecars(ctx, i, blockHash)
-		if err != nil {
-			return fmt.Errorf("read blob sidecars: blockNum = %d, blobTxcount = %d, err = %v", i, blobTxCount, err)
-		}
-		if !found {
-			return fmt.Errorf("blob sidecars not found for block %d", i)
-		}
-		dataRLP, err := rlp.EncodeToBytes(sidecars)
-		if err != nil {
-			return err
-		}
-		if err := sn.AddWord(dataRLP); err != nil {
-			return err
-		}
-		if i%20_000 == 0 {
-			logger.Log(lvl, "Dumping bsc blobs", "progress", i)
+			return false, err
 		}
 
+		if blobTxCount == 0 {
+			emptyBlocks++
+			if err := sn.AddWord(nil); err != nil {
+				return false, err
+			}
+			processedBlocks++
+			return true, nil
+		}
+
+		blobBlocks++
+		sidecars, found, err := blobStore.ReadBlobSidecars(ctx, blockNum, blockHash)
+		if err != nil {
+			return false, fmt.Errorf("read blob sidecars: blockNum = %d, blobTxcount = %d, err = %v", blockNum, blobTxCount, err)
+		}
+		if !found {
+			return false, fmt.Errorf("blob sidecars not found for block %d", blockNum)
+		}
+
+		dataRLP, err := rlp.EncodeToBytes(sidecars)
+		if err != nil {
+			return false, err
+		}
+
+		if err := sn.AddWord(dataRLP); err != nil {
+			return false, err
+		}
+
+		processedBlocks++
+		if blockNum%20_000 == 0 {
+			logger.Log(lvl, "[bsc snapshots] Dumping bsc blobs", "progress", blockNum)
+		}
+
+		return true, nil
+	}); err != nil {
+		return err
 	}
-	tx.Rollback()
+
+	dataProcessingDuration := time.Since(dataProcessingStart)
+	logger.Log(lvl, "[bsc snapshots] Data processing completed", "duration", dataProcessingDuration, "processedBlocks", processedBlocks, "emptyBlocks", emptyBlocks, "blobBlocks", blobBlocks, "blocks/sec", float64(processedBlocks)/dataProcessingDuration.Seconds())
+
+	compressionStart := time.Now()
 	if err := sn.Compress(); err != nil {
 		return fmt.Errorf("compress: %w", err)
 	}
-	// Generate .idx file, which is the slot => offset mapping.
-	p := &background.Progress{}
+	compressionDuration := time.Since(compressionStart)
+	logger.Log(lvl, "[bsc snapshots] Compression completed", "duration", compressionDuration)
 
+	// Generate .idx file, which is the slot => offset mapping.
+	indexingStart := time.Now()
+	p := &background.Progress{}
 	if err := f.Type.BuildIndexes(ctx, f, nil, chainConfig, tmpDir, p, lvl, logger); err != nil {
 		return err
 	}
+	indexingDuration := time.Since(indexingStart)
+	logger.Log(lvl, "[bsc snapshots] Indexing completed", "duration", indexingDuration)
+
+	totalDuration := time.Since(startTime)
+	logger.Log(lvl, "[bsc snapshots] dumpBlobsRange completed", "totalDuration", totalDuration, "dataProcessing", dataProcessingDuration, "compression", compressionDuration, "indexing", indexingDuration)
 
 	return nil
 }
 
 func DumpBlobs(ctx context.Context, blockFrom, blockTo uint64, chainConfig *chain.Config, tmpDir, snapDir string, chainDB kv.RoDB, workers int, lvl log.Lvl, blockReader services.FullBlockReader, blobStore services.BlobStorage, logger log.Logger) error {
-	for i := blockFrom; i < blockTo; i = chooseSegmentEnd(i, blockTo, coresnaptype.Enums.BscBlobs, chainConfig) {
-		blocksPerFile := snapcfg.MergeLimitFromCfg(snapcfg.KnownCfg(""), coresnaptype.Enums.BscBlobs, i)
-		if blockTo-i < blocksPerFile {
-			break
-		}
-		logger.Log(lvl, "Dumping blobs sidecars", "from", i, "to", blockTo)
-		if err := dumpBlobsRange(ctx, i, chooseSegmentEnd(i, blockTo, coresnaptype.Enums.BscBlobs, chainConfig), tmpDir, snapDir, chainDB, blobStore, blockReader, chainConfig, workers, lvl, logger); err != nil {
-			return err
-		}
-	}
-	return nil
+	startTime := time.Now()
+	err := dumpBlobsRange(ctx, blockFrom, blockTo, tmpDir, snapDir, chainDB, blobStore, blockReader, chainConfig, workers, lvl, logger)
+
+	duration := time.Since(startTime)
+	blockCount := blockTo - blockFrom
+	logger.Log(lvl, "[bsc snapshots] Dumping blobs sidecars completed", "from", blockFrom, "to", blockTo, "duration", duration, "blocks", blockCount, "blocks/sec", float64(blockCount)/duration.Seconds())
+
+	return err
 }
 
 func (s *BscRoSnapshots) ReadBlobSidecars(blockNum uint64) ([]*types.BlobSidecar, error) {

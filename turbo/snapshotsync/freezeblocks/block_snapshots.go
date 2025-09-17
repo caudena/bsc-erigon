@@ -35,6 +35,7 @@ import (
 	"golang.org/x/sync/semaphore"
 
 	"github.com/erigontech/erigon-lib/chain"
+	"github.com/erigontech/erigon-lib/chain/networkname"
 	"github.com/erigontech/erigon-lib/chain/snapcfg"
 	"github.com/erigontech/erigon-lib/common"
 	common2 "github.com/erigontech/erigon-lib/common"
@@ -131,7 +132,10 @@ func chooseSegmentEnd(from, to uint64, snapType snaptype.Enum, chainConfig *chai
 	if chainConfig != nil {
 		chainName = chainConfig.ChainName
 	}
-	blocksPerFile := snapcfg.MergeLimitFromCfg(snapcfg.KnownCfg(chainName), snapType, from)
+	blocksPerFile := uint64(snaptype.Erigon2OldMergeLimit)
+	if chainName != networkname.BSC && chainName != networkname.Chapel {
+		blocksPerFile = snapcfg.MergeLimitFromCfg(snapcfg.KnownCfg(chainName), snapType, from)
+	}
 
 	next := (from/blocksPerFile + 1) * blocksPerFile
 	to = min(next, to)
@@ -428,7 +432,7 @@ func (br *BlockRetire) RetireBlocks(ctx context.Context, requestedMinBlockNum ui
 		br.maxScheduledBlock.Store(requestedMaxBlockNum)
 	}
 	includeBor := br.chainConfig.Bor != nil
-	includeBsc := br.chainConfig.Parlia != nil
+	includeBsc := br.chainConfig.Parlia != nil && br.bs.BlobKept()
 
 	if err := br.BuildMissedIndicesIfNeed(ctx, "RetireBlocks", br.notifier); err != nil {
 		return err

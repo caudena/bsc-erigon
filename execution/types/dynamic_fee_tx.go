@@ -424,7 +424,7 @@ func (tx *DynamicFeeTransaction) Sender(signer Signer) (common.Address, error) {
 			return *from, nil
 		}
 	}
-	addr, err := signer.Sender(tx)
+	addr, _, err := signer.Sender(tx)
 	if err != nil {
 		return common.Address{}, err
 	}

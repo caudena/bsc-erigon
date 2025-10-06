@@ -21,7 +21,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/erigontech/erigon/execution/consensus/parlia"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -29,6 +28,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/erigontech/erigon/execution/consensus/parlia"
 
 	"github.com/c2h5oh/datasize"
 	"github.com/erigontech/mdbx-go/mdbx"
@@ -802,7 +803,7 @@ func stageSenders(db kv.TemporalRwDB, ctx context.Context, logger log.Logger) er
 			}
 			signer := types.MakeSigner(chainConfig, i, h.Time)
 			for j := 0; j < txs.Len(); j++ {
-				from, err := signer.Sender(txs[j])
+				from, _, err := signer.Sender(txs[j])
 				if err != nil {
 					return err
 				}
